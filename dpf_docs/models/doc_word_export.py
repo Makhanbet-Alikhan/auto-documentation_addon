@@ -251,10 +251,12 @@ class DocWordExport(models.AbstractModel):
             mod_name = doc_module.name or doc_module.technical_name
             self._heading(document, "3.%d. %s" % (sub, mod_name), 2)
 
-            funcs = doc_module.function_ids
+            funcs = doc_module.function_ids.sorted(
+                key=lambda f: ((f.number or 999999), (f.sequence or 999999), f.id)
+            )
             if not funcs:
                 p = document.add_paragraph()
-                r = p.add_run("Функции для данного модуля не сформированы."
+                r = p.add_run("Функции для данного модуля не сформированы.")
                 r.font.color.rgb = _grey()
                 r.italic = True
                 continue
@@ -368,10 +370,10 @@ class DocWordExport(models.AbstractModel):
     def _add_bibliography_section(self, document, modules):
         m = modules[:1]
         document.add_page_break()
-        self._heading(document, "4. Литеႈатуႈа", 1)
+        self._heading(document, "4. Литература", 1)
         self._bullets(document, m.bibliography if m else "")
 
     def _add_glossary_section(self, document, modules):
         m = modules[:1]
-        self._heading(document, "5. Словаႈь теႈминов", 1)
+        self._heading(document, "5. Словарь терминов", 1)
         self._bullets(document, m.glossary if m else "")

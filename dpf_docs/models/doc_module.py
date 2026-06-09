@@ -113,24 +113,45 @@ class DocModule(models.Model):
     def build_functions_from_menus(self):
         """(Re)create doc.function entries from this module's menu tree.
 
-        One function is generated per documented screen. Screens that carry a
-        window action become numbered functions with their captured screenshot
-        attached; the wording is deterministic and editable afterwards.
+        One function is generated per documented screen. Duplicate menus
+        (same name + model + view_modes) are skipped. Menus are sorted by
+        sequence so the function numbering matches the UI order.
         """
         self.ensure_one()
         self.function_ids.unlink()
         composer = self.env["doc.text.defaults"]
         number = 0
-        for menu in self.menu_ids:
+
+        # Sort menus by sequence first, then by name, then by id as tie-breaker
+        menus = self.menu_ids.sorted(
+            key=lambda m: ((m.sequence or 999999), (m.complete_name or ""), m.id)
+        )
+
+        seen = set()
+        for menu in menus:
             # Skip pure container menus that do not open any screen.
             if menu.capture_state == "skipped" and not menu.res_model:
                 continue
+
+            # Deduplicate by (name, model, normalised view_modes)
+            normalized_views = ",".join(sorted(set(
+                v.strip() for v in (menu.view_modes or "").split(",") if v.strip()
+            )))
+            dedupe_key = (
+                (menu.name or "").strip().lower(),
+                (menu.res_model or "").strip().lower(),
+                normalized_views,
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
             number += 1
             entry = composer.function_for_menu(menu, number)
             entry.update({
                 "doc_module_id": self.id,
                 "doc_menu_id": menu.id,
-                "sequence": menu.sequence,
+                "sequence": number * 10,
                 "number": number,
                 "screenshot": menu.screenshot or False,
                 "screenshot_source": "menu" if menu.screenshot else "none",
