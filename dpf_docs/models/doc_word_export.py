@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
 """Word (.docx) export for documented modules, user-manual style.
 
-Implemented as a separate model (``doc.word.export``, an AbstractModel service)
-so the export logic stays in its own file, per the project's one-class-per-file
-architecture.
+Generates a complete Russian-language user manual in Word format:
 
-The generated document mirrors the reference user manual:
+* Tittle page (system name, "Руководство пользователя", version, developer, city/year)
+* Real Word TOC field ("ОГЛАВЛЕНИЕ")
+* 1. Введение (1.1 Категории, 1.2 Область, 1.3 Назначение, 1.4 Соглашения)
+* 2. Содержание документа (2.1 Назначение, 2.2 Материалы, 2.3 Подготовка)
+* 3. Список функций — one block per function:
+    Функция N: <title>  →  Описание / Требования / Порядок выполнения / screenshot or placeholder / Результат
+* 4. Литература
+* 5. Словарь терминов
 
-* a centered title page (system name, "Руководство пользователя", version,
-  developer, city / year);
-* a real Word table of contents ("ОГЛАВЛЕНИЕ") built from a TOC field so it
-  paginates correctly once the reader updates fields;
-* numbered, bold section headings (1. Введение, 2. Содержание документа,
-  3. Список функций, 4. Литература, 5. Словарь);
-* per-function blocks: bold "Функция N:", bold "Описание:" / "Требования:"
-  labels (requirements text in red), a numbered "Порядок выполнения:" list, a
-  centered screenshot with a "Рис.N" caption, and a bold "Результат:".
+Screenshots are optional: if a function has no screenshot a greyed
+italic placeholder line is inserted instead.
 
-``python-docx`` is required for this feature. It is imported lazily so the
-addon still installs and runs (Markdown + PDF) on systems where it is missing;
-the Word button then raises a clear, actionable error instead of failing at
-import time.
+``python-docx`` is loaded lazily so the addon still installs without it;
+the Word button then raises a clear, actionable error.
 """
 import base64
 import io
@@ -38,13 +34,20 @@ try:
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     HAS_DOCX = True
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover
     HAS_DOCX = False
 
-
-# Visual constants (kept close to the reference manual look).
 BODY_FONT = "Times New Roman"
-BODY_SIZE = 12  # points
+BODY_SIZE = 12
+_GREY = None  # lazy RGBColor below
+
+
+def _grey():
+    return RGBColor(0x80, 0x80, 0x80)
+
+
+def _red():
+    return RGBColor(0xC0, 0x00, 0x00)
 
 
 class DocWordExport(models.AbstractModel):
@@ -56,119 +59,99 @@ class DocWordExport(models.AbstractModel):
     # ------------------------------------------------------------------
     @api.model
     def build_docx(self, doc_modules):
-        """Return raw .docx bytes documenting the given ``doc.module`` records."""
+        """Return raw .docx bytes for all given doc.module records."""
         if not HAS_DOCX:
             raise UserError(_(
-                "The Python package 'python-docx' is required for Word export.\n"
-                "Install it on the Odoo server with:  pip install python-docx"
+                "Пакет 'python-docx' не установлен на сервере.\n"
+                "Попросите администратора выполнить:  pip install python-docx"
             ))
 
         document = docx.Document()
         self._apply_base_styles(document)
 
-        # One manual covers one product; if several modules were collected we
-        # still produce a single document, using the first module's metadata
-        # for the cover and emitting a function chapter per module.
         primary = doc_modules[:1]
         self._add_cover(document, primary)
         self._add_toc(document)
-
         self._add_intro_section(document, primary)
         self._add_content_section(document, primary)
         self._add_functions_section(document, doc_modules)
         self._add_bibliography_section(document, primary)
         self._add_glossary_section(document, primary)
 
-        buffer = io.BytesIO()
-        document.save(buffer)
-        return buffer.getvalue()
+        buf = io.BytesIO()
+        document.save(buf)
+        return buf.getvalue()
 
     # ------------------------------------------------------------------
-    # Styling helpers
+    # Styling
     # ------------------------------------------------------------------
     def _apply_base_styles(self, document):
-        """Set a clean, manual-like default font for the whole document."""
         style = document.styles["Normal"]
         style.font.name = BODY_FONT
         style.font.size = Pt(BODY_SIZE)
-        # Ensure Cyrillic glyphs use the same face.
         rpr = style.element.get_or_add_rPr()
         rfonts = rpr.get_or_add_rFonts()
         rfonts.set(qn("w:cs"), BODY_FONT)
         rfonts.set(qn("w:eastAsia"), BODY_FONT)
 
-    @staticmethod
-    def _red():
-        return RGBColor(0xC0, 0x00, 0x00)
-
     # ------------------------------------------------------------------
     # Cover page
     # ------------------------------------------------------------------
     def _add_cover(self, document, modules):
-        """Centered title page matching the reference manual."""
-        module = modules[:1]
-        system_name = (module.system_name if module else None) or (
-            'Система "%s"' % (module.name if module else "Odoo")
+        m = modules[:1]
+        system_name = (m.system_name if m else None) or (
+            'Система "%s"' % (m.name if m else "Odoo")
         )
-        platform = (module.platform_version if module else None) or "Odoo 19"
-        version = (module.manual_version if module else None) or "1.0"
-        developer = (module.developer if module else None) or ""
-        city_year = (module.city_year if module else None) or ""
+        platform = (m.platform_version if m else None) or "Odoo 19"
+        version = (m.manual_version if m else None) or "1.0"
+        developer = (m.developer if m else None) or ""
+        city_year = (m.city_year if m else None) or ""
 
-        # Push the title block toward vertical center.
-        for _idx in range(7):
+        for _ in range(7):
             document.add_paragraph()
 
-        self._centered_line(document, system_name, bold=False, size=18)
-        self._centered_line(
-            document, 'на базе платформы "%s"' % platform, bold=False, size=18
-        )
+        self._centered(document, system_name, size=18)
+        self._centered(document, 'на базе платформы "%s"' % platform, size=16)
         document.add_paragraph()
-        self._centered_line(
-            document, "Руководство пользователя", bold=False, size=16
-        )
-        self._centered_line(document, "Версия %s" % version, bold=False, size=16)
+        self._centered(document, "Руководство пользователя", bold=True, size=18)
+        self._centered(document, "Версия %s" % version, size=14)
 
-        for _idx in range(3):
+        for _ in range(4):
             document.add_paragraph()
 
         if developer:
-            self._centered_line(
-                document, "Разработчик: %s" % developer, bold=False, size=12
-            )
+            self._centered(document, "Разработчик: %s" % developer, size=12)
 
-        # Footer city/year sits near the bottom of the page.
-        for _idx in range(7):
+        for _ in range(6):
             document.add_paragraph()
+
         if city_year:
-            self._centered_line(document, city_year, bold=False, size=12)
+            self._centered(document, city_year, size=12)
 
         document.add_page_break()
 
-    def _centered_line(self, document, text, bold=False, size=12):
-        para = document.add_paragraph()
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = para.add_run(text)
-        run.bold = bold
-        run.font.size = Pt(size)
-        return para
+    def _centered(self, document, text, bold=False, size=12):
+        p = document.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(text)
+        r.bold = bold
+        r.font.size = Pt(size)
+        r.font.name = BODY_FONT
+        return p
 
     # ------------------------------------------------------------------
-    # Table of contents (real Word TOC field)
+    # Table of contents
     # ------------------------------------------------------------------
     def _add_toc(self, document):
-        """Insert an "ОГЛАВЛЕНИЕ" header and a TOC field (levels 1-3)."""
-        header = document.add_paragraph()
-        header.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = header.add_run("ОГЛАВЛЕНИЕ")
+        h = document.add_paragraph()
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = h.add_run("ОГЛАВЛЕНИЕ")
         run.bold = True
         run.font.size = Pt(14)
         document.add_paragraph()
 
-        para = document.add_paragraph()
-        run = para.add_run()
-        # Build: <w:fldChar begin> <w:instrText> TOC ... </w:instrText>
-        #        <w:fldChar separate> "update fields" hint <w:fldChar end>
+        p = document.add_paragraph()
+        r = p.add_run()
         fld_begin = OxmlElement("w:fldChar")
         fld_begin.set(qn("w:fldCharType"), "begin")
         instr = OxmlElement("w:instrText")
@@ -176,194 +159,219 @@ class DocWordExport(models.AbstractModel):
         instr.text = r'TOC \o "1-3" \h \z \u'
         fld_sep = OxmlElement("w:fldChar")
         fld_sep.set(qn("w:fldCharType"), "separate")
-        placeholder = OxmlElement("w:t")
-        placeholder.text = (
+        hint = OxmlElement("w:t")
+        hint.text = (
             "Оглавление обновляется автоматически: "
-            "правый клик \u2192 «Обновить поле»."
+            "правый клик → «Обновить поле»."
         )
         fld_end = OxmlElement("w:fldChar")
         fld_end.set(qn("w:fldCharType"), "end")
-
-        run._r.append(fld_begin)
-        run._r.append(instr)
-        run._r.append(fld_sep)
-        run._r.append(placeholder)
-        run._r.append(fld_end)
-
+        r._r.extend([fld_begin, instr, fld_sep, hint, fld_end])
         document.add_page_break()
 
     # ------------------------------------------------------------------
-    # Heading helpers (numbered, bold, registered in the TOC)
+    # Heading helpers
     # ------------------------------------------------------------------
     def _heading(self, document, text, level):
-        """Add a bold numbered heading that the TOC field will pick up.
-
-        We use python-docx's built-in Heading styles (level 1-3) so they are
-        included in the TOC, but override the look to match the manual: bold,
-        black, body font, modest size.
-        """
-        para = document.add_heading("", level=level)
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = para.add_run(text)
-        run.bold = True
-        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-        run.font.name = BODY_FONT
-        run.font.size = Pt(14 if level == 1 else 12)
-        return para
-
-    def _bullets(self, document, text):
-        """Render each non-empty line of ``text`` as a bullet paragraph."""
-        for line in (text or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            document.add_paragraph(line, style="List Bullet")
+        p = document.add_heading("", level=level)
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        r = p.add_run(text)
+        r.bold = True
+        r.font.color.rgb = RGBColor(0, 0, 0)
+        r.font.name = BODY_FONT
+        r.font.size = Pt(14 if level == 1 else 12)
+        return p
 
     def _paragraph(self, document, text):
-        if text:
+        if text and text.strip():
             document.add_paragraph(text.strip())
+
+    def _bullets(self, document, text):
+        """Each non-empty line becomes a bullet."""
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line:
+                document.add_paragraph(line, style="List Bullet")
+
+    def _numbered_lines(self, document, text):
+        """Each non-empty line becomes a numbered paragraph starting at 1."""
+        for i, line in enumerate(
+            [l.strip() for l in (text or "").splitlines() if l.strip()], 1
+        ):
+            p = document.add_paragraph()
+            p.paragraph_format.left_indent = Pt(18)
+            p.add_run("%d. %s" % (i, line))
 
     # ------------------------------------------------------------------
     # 1. Введение
     # ------------------------------------------------------------------
     def _add_intro_section(self, document, modules):
-        module = modules[:1]
+        m = modules[:1]
         self._heading(document, "1. Введение", 1)
 
-        self._heading(document, "1.1. Описание категории пользователей", 2)
-        self._bullets(document, module.intro_user_categories if module else "")
+        self._heading(document, "1.1. Описание категорий пользователей", 2)
+        self._bullets(document, m.intro_user_categories if m else "")
 
         self._heading(document, "1.2. Область применения", 2)
-        self._bullets(document, module.intro_scope if module else "")
+        self._bullets(document, m.intro_scope if m else "")
 
         self._heading(document, "1.3. Назначение документа", 2)
-        self._paragraph(document, module.intro_purpose if module else "")
+        self._paragraph(document, m.intro_purpose if m else "")
 
         self._heading(document, "1.4. Соглашения", 2)
-        self._heading(document, "1.4.1. Стилистические соглашения", 3)
-        self._bullets(document, module.intro_conventions if module else "")
+        self._bullets(document, m.intro_conventions if m else "")
 
     # ------------------------------------------------------------------
     # 2. Содержание документа
     # ------------------------------------------------------------------
     def _add_content_section(self, document, modules):
-        module = modules[:1]
+        m = modules[:1]
         self._heading(document, "2. Содержание документа", 1)
 
         self._heading(document, "2.1. Назначение", 2)
-        self._paragraph(document, module.content_purpose if module else "")
+        self._paragraph(document, m.content_purpose if m else "")
 
-        self._heading(document, "2.2. Материалы", 2)
-        self._bullets(document, module.content_materials if module else "")
+        self._heading(document, "2.2. Необходимые материалы", 2)
+        self._bullets(document, m.content_materials if m else "")
 
-        self._heading(document, "2.3. Подготовка", 2)
-        self._bullets(document, module.content_preparation if module else "")
+        self._heading(document, "2.3. Подготовка к работе", 2)
+        self._numbered_lines(document, m.content_preparation if m else "")
 
     # ------------------------------------------------------------------
-    # 3. Список функций (core)
+    # 3. Список функций
     # ------------------------------------------------------------------
     def _add_functions_section(self, document, doc_modules):
         document.add_page_break()
         self._heading(document, "3. Список функций", 1)
 
-        sub = 0
         figure = 0
+        sub = 0
         for doc_module in doc_modules:
             sub += 1
-            self._heading(
-                document,
-                "3.%d. %s" % (sub, doc_module.name or doc_module.technical_name),
-                2,
-            )
-            functions = doc_module.function_ids
-            if not functions:
-                self._paragraph(
-                    document, "Функции для данного модуля не сформированы."
-                )
+            mod_name = doc_module.name or doc_module.technical_name
+            self._heading(document, "3.%d. %s" % (sub, mod_name), 2)
+
+            funcs = doc_module.function_ids
+            if not funcs:
+                p = document.add_paragraph()
+                r = p.add_run("Функции для данного модуля не сформированы."
+                r.font.color.rgb = _grey()
+                r.italic = True
                 continue
-            for func in functions:
+
+            for func in funcs:
                 figure = self._add_function(document, func, figure)
 
     def _add_function(self, document, func, figure):
-        """Render one doc.function block; return the updated figure counter."""
-        # Bold "Функция N: Title."
-        title_para = document.add_paragraph()
-        title_para.paragraph_format.space_before = Pt(10)
-        run = title_para.add_run(
-            "Функция %d: %s." % (func.number or 0, func.name or "")
-        )
-        run.bold = True
+        """Render one function block. Returns updated figure counter."""
+        # Функция N: Title
+        title_p = document.add_paragraph()
+        title_p.paragraph_format.space_before = Pt(10)
+        r = title_p.add_run("Функция %d: %s." % (func.number or 0, func.name or ""))
+        r.bold = True
+        r.font.size = Pt(12)
 
-        # Описание:
+        # Описание
         self._labelled(document, "Описание:", func.description)
 
-        # Требования: (label bold, value red)
-        if func.requirements:
-            req = document.add_paragraph()
-            label = req.add_run("Требования: ")
-            label.bold = True
-            value = req.add_run(func.requirements.strip())
-            value.font.color.rgb = self._red()
+        # Требования (red text)
+        if func.requirements and func.requirements.strip():
+            p = document.add_paragraph()
+            lbl = p.add_run("Требования: ")
+            lbl.bold = True
+            val = p.add_run(func.requirements.strip())
+            val.font.color.rgb = _red()
 
-        # Порядок выполнения: numbered steps.
-        # Numbers are written as plain text ("1. ...") so each function restarts
-        # at 1, exactly like the reference manual (Word's List Number style
-        # would otherwise continue numbering across the whole document).
-        steps = func.step_lines()
+        # Порядок выполнения
+        steps = func.step_lines() if hasattr(func, "step_lines") else []
         if steps:
-            head = document.add_paragraph()
-            head.add_run("Порядок выполнения:").bold = True
-            for index, line in enumerate(steps, start=1):
-                para = document.add_paragraph()
-                para.paragraph_format.left_indent = Pt(18)
-                para.add_run("%d. %s" % (index, line))
+            p = document.add_paragraph()
+            p.add_run("Порядок выполнения:").bold = True
+            for idx, step in enumerate(steps, 1):
+                sp = document.add_paragraph()
+                sp.paragraph_format.left_indent = Pt(18)
+                sp.add_run("%d. %s" % (idx, step))
 
-        # Screenshot + figure caption.
+        # Screenshot or placeholder
         if func.screenshot:
-            figure += 1
-            self._add_screenshot(document, func, figure)
+            figure = self._embed_screenshot(document, func, figure)
+        else:
+            figure = self._add_screenshot_placeholder(document, func, figure)
 
-        # Результат:
+        # Результат
         self._labelled(document, "Результат:", func.result)
+
+        # Separator
+        sep = document.add_paragraph()
+        sep.paragraph_format.space_after = Pt(6)
+
         return figure
 
     def _labelled(self, document, label, value):
-        """Bold inline label followed by normal text in the same paragraph."""
-        if not value:
+        """Bold label + normal text in the same paragraph."""
+        if not value or not value.strip():
             return
-        para = document.add_paragraph()
-        run = para.add_run(label + " ")
-        run.bold = True
-        para.add_run(value.strip())
+        p = document.add_paragraph()
+        r = p.add_run(label + " ")
+        r.bold = True
+        p.add_run(value.strip())
 
-    def _add_screenshot(self, document, func, figure):
-        """Embed a centered screenshot followed by a 'Рис.N' caption."""
+    def _embed_screenshot(self, document, func, figure):
+        """Embed a real screenshot image with a figure caption."""
         try:
-            image_bytes = base64.b64decode(func.screenshot)
-            stream = io.BytesIO(image_bytes)
+            stream = io.BytesIO(base64.b64decode(func.screenshot))
             document.add_picture(stream, width=Inches(5.5))
             document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-            caption = document.add_paragraph()
-            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            cap_text = func.screenshot_caption or func.name or ""
-            cap_run = caption.add_run("Рис.%d %s" % (figure, cap_text))
-            cap_run.font.size = Pt(10)
-        except Exception as exc:  # pragma: no cover - defensive
+            figure += 1
+            cap_p = document.add_paragraph()
+            cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            caption_text = func.screenshot_caption or func.name or ""
+            cap_r = cap_p.add_run("Рис.%d %s" % (figure, caption_text))
+            cap_r.font.size = Pt(10)
+            cap_r.italic = True
+        except Exception as exc:  # pragma: no cover
             _logger.warning(
                 "Could not embed screenshot for function %s: %s", func.id, exc
             )
+        return figure
+
+    def _add_screenshot_placeholder(self, document, func, figure):
+        """Вставить текстовую заглушку вместо скриншота."""
+        figure += 1
+        name = func.name or "экрана"
+        caption_text = func.screenshot_caption or name
+
+        # Grey bordered placeholder block
+        p = document.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(
+            "📌 [Здесь должен быть скриншот экрана «%s»]"
+            % name
+        )
+        r.font.color.rgb = _grey()
+        r.italic = True
+        r.font.size = Pt(11)
+
+        # Caption line below placeholder
+        cap_p = document.add_paragraph()
+        cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap_r = cap_p.add_run("Рис.%d %s" % (figure, caption_text))
+        cap_r.font.size = Pt(10)
+        cap_r.italic = True
+        cap_r.font.color.rgb = _grey()
+
+        return figure
 
     # ------------------------------------------------------------------
     # 4. Литература / 5. Словарь
     # ------------------------------------------------------------------
     def _add_bibliography_section(self, document, modules):
-        module = modules[:1]
+        m = modules[:1]
         document.add_page_break()
-        self._heading(document, "4. Литература", 1)
-        self._bullets(document, module.bibliography if module else "")
+        self._heading(document, "4. Литеႈатуႈа", 1)
+        self._bullets(document, m.bibliography if m else "")
 
     def _add_glossary_section(self, document, modules):
-        module = modules[:1]
-        self._heading(document, "5. Словарь", 1)
-        self._bullets(document, module.glossary if module else "")
+        m = modules[:1]
+        self._heading(document, "5. Словаႈь теႈминов", 1)
+        self._bullets(document, m.glossary if m else "")
