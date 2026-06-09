@@ -8,11 +8,10 @@ modules, presses *Generate*, and this model coordinates the whole pipeline:
 2. parse the source code (docstrings, comments)         -> doc.source.parser
 3. compose texts (deterministic, optional LLM)          -> services.text_composer
 4. persist doc.module / doc.menu / doc.model.info
-5. expose screenshot tasks to the Playwright worker     -> controllers.doc_api
-6. render Markdown / PDF once screenshots are uploaded   -> _render_markdown / report
+5. render Markdown / PDF / Word                         -> _render_markdown / report
 
-The actual screenshots are taken outside Odoo by the Node worker, because the
-Owl 2 web client only renders in a real browser.
+Screenshots are NOT captured automatically. Placeholder text is inserted
+instead so that a human can later paste real images from an external tool.
 """
 import base64
 import logging
@@ -24,6 +23,11 @@ from ..services import text_composer
 
 _logger = logging.getLogger(__name__)
 
+# Placeholder shown in every output format instead of a real screenshot.
+_SCREENSHOT_PLACEHOLDER = (
+    "📌 [Здесь должен быть скриншот экрана «%s»]"
+)
+
 
 class DocGeneration(models.Model):
     _name = "doc.generation"
@@ -32,53 +36,42 @@ class DocGeneration(models.Model):
     _order = "create_date desc"
 
     name = fields.Char(
-        string="Name", required=True, default=lambda self: _("New Generation")
+        string="Название", required=True, default=lambda self: _("Новый запуск")
     )
-    # Preferred way to choose what to document: pick installed modules from a
-    # dropdown. The worker reads module code automatically from disk, so no
-    # files need to be uploaded -- only a selection is required.
     module_ids = fields.Many2many(
         "ir.module.module",
-        string="Installed Modules",
+        string="Установленные модули",
         domain="[('state', '=', 'installed')]",
-        help="Select one or more installed modules to document.",
+        help="Выберите один или несколько установленных модулей для документирования.",
     )
-    # Optional fallback: free-text technical names (comma-separated). Useful for
-    # scripting / automation. Merged with the selected modules above.
     module_names = fields.Char(
-        string="Extra Module Names",
-        help="Optional comma-separated technical names, e.g. 'sale,my_addon'. "
-             "Merged with the selected installed modules.",
+        string="Дополнительные модули",
+        help="Необязательно. Технические названия через запятую, "
+             "например: 'sale,my_addon'.",
     )
     state = fields.Selection(
         [
-            ("draft", "Draft"),
-            ("collected", "Texts Collected"),
-            ("awaiting_shots", "Awaiting Screenshots"),
-            ("done", "Done"),
+            ("draft", "Черновик"),
+            ("collected", "Тексты собраны"),
+            ("awaiting_shots", "Ожидает скриншоты"),
+            ("done", "Готово"),
         ],
-        string="State",
+        string="Статус",
         default="draft",
         tracking=True,
     )
     doc_module_ids = fields.One2many(
-        "doc.module", "generation_id", string="Documented Modules"
+        "doc.module", "generation_id", string="Задокументированные модули"
     )
     use_llm_caption = fields.Boolean(
-        string="Use LLM Captions",
-        help="If set, the worker may caption screenshots with a Vision LLM.",
+        string="Использовать LLM-подписи",
+        help="Если включено, внешний воркер может подписывать скриншоты через Vision LLM.",
     )
 
     # ------------------------------------------------------------------
     # Step 1-4: collect texts + structure
     # ------------------------------------------------------------------
     def _resolve_module_names(self):
-        """Return the de-duplicated list of module technical names to document.
-
-        Combines the dropdown selection with any free-text names. This is how
-        the addon decides which installed modules to introspect -- it never
-        needs the source files to be uploaded; it reads them from disk.
-        """
         names = list(self.module_ids.mapped("name"))
         for raw in (self.module_names or "").split(","):
             raw = raw.strip()
@@ -87,11 +80,11 @@ class DocGeneration(models.Model):
         return names
 
     def action_collect(self):
-        """Introspect + parse + compose + persist for every chosen module."""
+        """Собрать данные о модуле: меню, поля, описания."""
         self.ensure_one()
         modules = self._resolve_module_names()
         if not modules:
-            raise UserError(_("Please select at least one module to document."))
+            raise UserError(_("Выберите хотя бы один модуль для документирования."))
 
         introspector = self.env["doc.introspector"]
         parser = self.env["doc.source.parser"]
@@ -109,7 +102,7 @@ class DocGeneration(models.Model):
             [("name", "=", module_name)], limit=1
         )
         if not ir_module:
-            raise UserError(_("Module '%s' is not installed.") % module_name)
+            raise UserError(_("Модуль '%s' не установлен.") % module_name)
 
         parsed = parser.parse_module(module_name)
         manifest = {
@@ -129,9 +122,6 @@ class DocGeneration(models.Model):
 
         self._build_menus(doc_module, module_name, introspector)
         self._build_models(doc_module, module_name, introspector, parser, parsed)
-        # Fill the user-manual metadata with deterministic Russian defaults and
-        # derive one editable "function" entry per documented screen, so the
-        # PDF/Word export already matches the reference manual layout.
         doc_module.apply_manual_defaults()
         doc_module.build_functions_from_menus()
         return doc_module
@@ -158,7 +148,8 @@ class DocGeneration(models.Model):
                 "view_modes": ",".join(node.get("view_modes") or []),
                 "web_url": node.get("web_url") or False,
                 "caption": caption,
-                "capture_state": "pending" if has_action else "skipped",
+                # Never auto-capture: screenshots are inserted manually.
+                "capture_state": "skipped",
             })
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
@@ -166,8 +157,6 @@ class DocGeneration(models.Model):
         for minfo in introspector.get_module_models(module_name):
             res_model = minfo["model"]
             fields_meta = introspector.get_fields_meta(res_model)
-            # The class name is unknown from ir.model, so we match by model name
-            # heuristically against parsed docstrings (best effort).
             class_doc = self._guess_class_doc(parsed, res_model)
             field_comments = self._guess_field_comments(parsed, res_model)
             rows = text_composer.compose_field_table_rows(fields_meta, field_comments)
@@ -185,13 +174,10 @@ class DocGeneration(models.Model):
 
     @staticmethod
     def _guess_class_doc(parsed, res_model):
-        """Best-effort match of a class docstring to a model name."""
-        # Convention: model 'my.model' usually maps to class 'MyModel'.
         candidate = "".join(p.capitalize() for p in res_model.replace(".", "_").split("_"))
         classes = (parsed or {}).get("classes", {})
         if candidate in classes:
             return classes[candidate]
-        # Fall back to any class whose doc mentions the model name.
         for doc in classes.values():
             if doc and res_model in doc:
                 return doc
@@ -199,7 +185,6 @@ class DocGeneration(models.Model):
 
     @staticmethod
     def _guess_field_comments(parsed, res_model):
-        """Collect field comments whose class likely maps to ``res_model``."""
         candidate = "".join(p.capitalize() for p in res_model.replace(".", "_").split("_"))
         prefix = "%s." % candidate
         out = {}
@@ -209,50 +194,146 @@ class DocGeneration(models.Model):
         return out
 
     # ------------------------------------------------------------------
-    # Step 6: rendering
+    # Markdown rendering — user-friendly style
     # ------------------------------------------------------------------
     @api.model
     def _render_markdown(self, doc_module):
-        """Render one doc.module to a Markdown string."""
+        """Рендер одного doc.module в Markdown в стиле руководства пользователя."""
         lines = []
-        lines.append("# %s\n" % (doc_module.name or doc_module.technical_name))
-        lines.append("> Technical name: `%s`\n" % doc_module.technical_name)
-        if doc_module.description:
-            lines.append(doc_module.description.strip() + "\n")
+        title = doc_module.name or doc_module.technical_name
 
-        lines.append("\n## Menus\n")
-        for menu in doc_module.menu_ids:
-            indent = "  " if menu.complete_name and "/" in (menu.complete_name or "") else ""
-            lines.append("%s- **%s**" % (indent, menu.name))
-            if menu.caption:
-                lines.append("%s  %s" % (indent, menu.caption))
-            if menu.capture_state == "captured":
-                fname = menu.screenshot_filename or ("menu_%s.png" % menu.id)
-                lines.append("%s  ![%s](img/%s)" % (indent, menu.name, fname))
+        # ---- Титул ----
+        lines.append("# Руководство пользователя")
+        lines.append("## %s" % title)
+        if doc_module.system_name:
+            lines.append("> %s" % doc_module.system_name)
+        lines.append("> Версия: %s" % (doc_module.manual_version or "1.0"))
+        if doc_module.developer:
+            lines.append("> Разработчик: %s" % doc_module.developer)
+        if doc_module.city_year:
+            lines.append("> %s" % doc_module.city_year)
+        lines.append("")
+
+        # ---- 1. Введение ----
+        lines.append("## 1. Введение")
+        if doc_module.intro_user_categories:
+            lines.append("### 1.1 Описание категорий пользователей")
+            for line in doc_module.intro_user_categories.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
+            lines.append("")
+        if doc_module.intro_scope:
+            lines.append("### 1.2 Область применения")
+            for line in doc_module.intro_scope.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
+            lines.append("")
+        if doc_module.intro_purpose:
+            lines.append("### 1.3 Назначение документа")
+            lines.append(doc_module.intro_purpose.strip())
+            lines.append("")
+        if doc_module.intro_conventions:
+            lines.append("### 1.4 Соглашения")
+            for line in doc_module.intro_conventions.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
             lines.append("")
 
-        lines.append("\n## Models\n")
-        for model in doc_module.model_ids:
-            lines.append("### `%s` — %s\n" % (model.technical_name, model.display_name or ""))
-            if model.description:
-                lines.append(model.description.strip() + "\n")
-            rows = model.field_table_json or []
-            if rows:
-                lines.append("| Field | Label | Type | Required | Help |")
-                lines.append("|-------|-------|------|----------|------|")
-                for r in rows:
-                    lines.append("| `%s` | %s | %s | %s | %s |" % (
-                        r.get("name", ""),
-                        r.get("label", ""),
-                        r.get("type", ""),
-                        "yes" if r.get("required") else "",
-                        (r.get("help") or "").replace("\n", " ").replace("|", "\\|"),
-                    ))
+        # ---- 2. Содержание документа ----
+        lines.append("## 2. Содержание документа")
+        if doc_module.content_purpose:
+            lines.append("### 2.1 Назначение")
+            lines.append(doc_module.content_purpose.strip())
+            lines.append("")
+        if doc_module.content_materials:
+            lines.append("### 2.2 Материалы")
+            for line in doc_module.content_materials.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
+            lines.append("")
+        if doc_module.content_preparation:
+            lines.append("### 2.3 Подготовка к работе")
+            for i, line in enumerate(
+                [l for l in doc_module.content_preparation.splitlines() if l.strip()], 1
+            ):
+                lines.append("%d. %s" % (i, line.strip()))
+            lines.append("")
+
+        # ---- 3. Список функций ----
+        lines.append("## 3. Список функций")
+        lines.append("")
+        for func in doc_module.function_ids:
+            lines.append("### Функция %d: %s" % (func.number or 0, func.name or ""))
+            lines.append("")
+            if func.description:
+                lines.append("**Описание:** %s" % func.description.strip())
                 lines.append("")
+            if func.requirements:
+                lines.append("**Требования:** %s" % func.requirements.strip())
+                lines.append("")
+            steps = func.step_lines() if hasattr(func, "step_lines") else []
+            if steps:
+                lines.append("**Порядок выполнения:**")
+                for i, step in enumerate(steps, 1):
+                    lines.append("%d. %s" % (i, step))
+                lines.append("")
+            # Screenshot placeholder — no auto-capture.
+            lines.append("> %s" % (_SCREENSHOT_PLACEHOLDER % (func.name or "")))
+            lines.append("")
+            if func.result:
+                lines.append("**Результат:** %s" % func.result.strip())
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        # ---- Таблицы полей (приложение) ----
+        if doc_module.model_ids:
+            lines.append("## Приложение. Описание полей")
+            lines.append("")
+            for model in doc_module.model_ids:
+                lines.append(
+                    "### %s — %s" % (
+                        model.display_name or model.technical_name,
+                        "`%s`" % model.technical_name,
+                    )
+                )
+                if model.description:
+                    lines.append(model.description.strip())
+                    lines.append("")
+                rows = model.field_table_json or []
+                if rows:
+                    lines.append("| Поле | Название | Тип | Обязательное | Описание |")
+                    lines.append("|------|-------|-----|-----------|---------|")
+                    for r in rows:
+                        lines.append("| `%s` | %s | %s | %s | %s |" % (
+                            r.get("name", ""),
+                            r.get("label", ""),
+                            r.get("type", ""),
+                            "Да" if r.get("required") else "",
+                            (r.get("help") or "").replace("\n", " ").replace("|", "\\|"),
+                        ))
+                    lines.append("")
+
+        # ---- 4. Литература ----
+        if doc_module.bibliography:
+            lines.append("## 4. Литература")
+            for line in doc_module.bibliography.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
+            lines.append("")
+
+        # ---- 5. Словарь ----
+        if doc_module.glossary:
+            lines.append("## 5. Словарь терминов")
+            for line in doc_module.glossary.splitlines():
+                if line.strip():
+                    lines.append("- %s" % line.strip())
+            lines.append("")
+
         return "\n".join(lines)
 
     def action_render_all(self):
-        """Render Markdown for every documented module and mark run done."""
+        """Рендер Markdown для каждого задокументированного модуля."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
             doc_module.markdown = self._render_markdown(doc_module)
@@ -260,41 +341,37 @@ class DocGeneration(models.Model):
         return True
 
     def action_capture_screenshots(self):
-        """Capture screenshots automatically for every documented module."""
-        self.ensure_one()
-        captured = failed = 0
-        for doc_module in self.doc_module_ids:
-            result = doc_module.capture_screenshots(only_missing=True)
-            captured += result.get("captured", 0)
-            failed += result.get("failed", 0)
+        """Кнопка оставлена для совместимости. Скриншоты загружаются вручную."""
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
-                "title": _("Automatic Screenshots"),
-                "message": _("Captured: %s, failed: %s.") % (captured, failed),
-                "type": "success" if not failed else "warning",
-                "sticky": False,
+                "title": _("Скриншоты"),
+                "message": _(
+                    "Автоматический захват отключён. Загрузите скриншоты вручную: "
+                    "откройте задокументированный модуль ➜ вкладка «Функции» ➜ "
+                    "откройте функцию ➜ поле «Скриншот»."
+                ),
+                "type": "info",
+                "sticky": True,
             },
         }
 
     def action_print_pdf(self):
-        """Trigger the QWeb PDF report for the documented modules."""
+        """Печать PDF-отчёта для задокументированных модулей."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
-            doc_module._auto_capture_if_enabled()
             doc_module.refresh_function_screenshots()
         return self.env.ref("dpf_docs.action_report_doc_module").report_action(
             self.doc_module_ids
         )
 
     def action_download_word(self):
-        """Generate ONE Word document covering every documented module."""
+        """Сгенерировать Word-документ для всех задокументированных модулей."""
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError(_("Nothing to export. Collect texts first."))
+            raise UserError_("Нечего экспортировать. Сначала выполните сбор текстов."))
         for doc_module in self.doc_module_ids:
-            doc_module._auto_capture_if_enabled()
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)
         filename = "%s.docx" % (self.name or "documentation").replace(" ", "_")
@@ -313,11 +390,8 @@ class DocGeneration(models.Model):
             "target": "self",
         }
 
-    # ------------------------------------------------------------------
-    # Worker integration helpers
-    # ------------------------------------------------------------------
     def get_worker_spec(self):
-        """Return the JSON spec the Playwright worker consumes."""
+        """Return the JSON spec the Playwright worker consumes (legacy)."""
         self.ensure_one()
         modules = []
         for doc_module in self.doc_module_ids:
@@ -334,17 +408,13 @@ class DocGeneration(models.Model):
 
     @api.model
     def _cron_dispatch_pending(self):
-        """Cron fallback: log generations still awaiting screenshots.
-
-        In production an external webhook / queue_job should drive the worker.
-        This cron only surfaces pending work; it does not start a browser.
-        """
+        """Cron: log pending generations (no browser is started)."""
         pending = self.search([("state", "=", "awaiting_shots")])
         for gen in pending:
             remaining = sum(len(m.pending_screenshot_tasks()) for m in gen.doc_module_ids)
             if remaining:
                 _logger.info(
-                    "Generation %s has %s screenshot task(s) awaiting the worker.",
+                    "Generation %s has %s screenshot task(s) awaiting manual upload.",
                     gen.id, remaining,
                 )
         return True
