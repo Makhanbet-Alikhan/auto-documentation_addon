@@ -298,7 +298,150 @@ class DocTextDefaults(models.AbstractModel):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # news.post — dedicated create / edit function
+    # Universal create function — works for ANY model
+    # ------------------------------------------------------------------
+    @api.model
+    def function_for_create(self, menu, number):
+        """Generate a universal «Создание записи» function for any model/menu.
+
+        Called automatically from build_functions_from_menus() for every menu
+        that has a form view (i.e. view_modes contains 'form' or is empty).
+        Produces a full click-by-click instruction set that explains how to
+        create a new record, including all key_fields defined on the menu.
+
+        For the legacy news.post model the dedicated function_for_news_create()
+        is still available but this method is the preferred replacement.
+        """
+        title = menu.name or "Раздел"
+        module_name = (
+            menu.doc_module_id.name if menu.doc_module_id else "системы"
+        )
+
+        # Human-readable singular noun derived from the menu title.
+        # Strip common plural suffixes so "Новости" → "новость" etc.
+        record_label = self._singular_label(title)
+
+        # Collect key fields for per-field description steps.
+        key_fields_raw = (getattr(menu, "key_fields", None) or "").strip()
+        field_steps = self._field_steps(key_fields_raw)
+
+        steps = [
+            "В главном меню системы найдите и нажмите на раздел «%s»." % module_name,
+            "В открывшемся подменю выберите пункт «%s»." % title,
+            "В открывшемся списке нажмите кнопку «New» (верхний левый угол экрана), "
+            "чтобы перейти к форме создания новой записи.",
+        ]
+
+        steps.extend(field_steps)
+
+        steps += [
+            "Поля, отмеченные звёздочкой (*), являются обязательными — "
+            "их необходимо заполнить перед сохранением.",
+            "После заполнения всех необходимых полей нажмите кнопку «Сохранить» "
+            "(значок облака в верхнем левом углу формы).",
+            "Новая запись появится в списке раздела «%s»." % title,
+        ]
+
+        return {
+            "name": "Создание записи «%s»" % record_label,
+            "description": (
+                "Функция предназначена для создания новой записи в разделе «%s» "
+                "системы %s. Пользователь заполняет форму, указывая все необходимые "
+                "данные, после чего сохраняет запись в системе." % (title, module_name)
+            ),
+            "requirements": (
+                "Пользователь должен быть авторизован в системе.\n"
+                "Пользователю должен быть предоставлен доступ к разделу «%s» и "
+                "право на создание новых записей. "
+                "При отсутствии доступа обратитесь к администратору системы."
+                % title
+            ),
+            "steps": "\n".join(steps),
+            "result": (
+                "Новая запись успешно создана и сохранена в системе. "
+                "Запись отображается в списке раздела «%s» и доступна "
+                "для дальнейшего просмотра, редактирования и обработки." % title
+            ),
+            "screenshot_caption": "Форма создания записи «%s»" % record_label,
+        }
+
+    @staticmethod
+    def _singular_label(menu_title):
+        """Return a best-effort singular lowercase label from a menu title.
+
+        Simple heuristic for common Russian plural endings used in menu names.
+        Falls back to the original title unchanged if no rule matches.
+        """
+        t = (menu_title or "").strip()
+        if not t:
+            return "запись"
+        lower = t.lower()
+        # Common plural → singular mappings (add more as needed)
+        replacements = [
+            ("ости", "ость"),   # Новости → Новость
+            ("оты", "ота"),     # Работы → Работа (rare)
+            ("ники", "ник"),    # Документы → keep generic
+            ("ументы", "умент"),
+            ("заявки", "заявка"),
+            ("заказы", "заказ"),
+            ("задачи", "задача"),
+            ("события", "событие"),
+            ("проекты", "проект"),
+            ("записи", "запись"),
+            ("статьи", "статья"),
+            ("контакты", "контакт"),
+            ("договоры", "договор"),
+            ("счета", "счёт"),
+        ]
+        for plural, singular in replacements:
+            if lower.endswith(plural):
+                return t[: len(t) - len(plural)] + singular
+        # No rule matched — use the title as-is but lowercase
+        return lower
+
+    @staticmethod
+    def _field_steps(key_fields_raw):
+        """Convert a comma/newline-separated key_fields string into step lines.
+
+        Each field entry is expected in one of the formats:
+          • «Field Label» — Description
+          • Field Label — Description
+          • Field Label: Description
+          • Plain field name (no description)
+
+        Returns a list of step strings ready to be joined into the steps text.
+        """
+        if not key_fields_raw:
+            return [
+                "Заполните все необходимые поля формы. "
+                "Названия полей отображаются слева от каждого поля ввода."
+            ]
+
+        # Split by newline or semicolon
+        import re
+        raw_items = re.split(r"[\n;]+", key_fields_raw)
+        steps = []
+        for item in raw_items:
+            item = item.strip().strip(",").strip()
+            if not item:
+                continue
+            # Try to split label from description
+            # Patterns: "Label — Desc", "Label - Desc", "Label: Desc"
+            match = re.match(r"^[«»\"\']?(.+?)[«»\"\']?\s*[—\-:]\s*(.+)$", item)
+            if match:
+                label = match.group(1).strip().strip("«»\"'")
+                desc = match.group(2).strip()
+                steps.append(
+                    "В поле «%s» — %s." % (label, desc[0].lower() + desc[1:])
+                )
+            else:
+                # No description — just instruct to fill the field
+                clean = item.strip("«»\"'")
+                steps.append("Заполните поле «%s»." % clean)
+        return steps
+
+    # ------------------------------------------------------------------
+    # news.post — dedicated create / edit function (legacy, kept for compat)
     # ------------------------------------------------------------------
     @api.model
     def function_for_news_create(self, menu, number):
@@ -307,6 +450,9 @@ class DocTextDefaults(models.AbstractModel):
         Called automatically from build_functions_from_menus() when the menu's
         res_model is 'news.post'. Produces a full click-by-click instruction
         set that explains every visible field on the news form.
+
+        Prefer function_for_create() for new modules — this method is kept
+        for backwards compatibility only.
         """
         module_name = (
             menu.doc_module_id.name if menu.doc_module_id else "DPF News"
