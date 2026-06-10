@@ -180,8 +180,9 @@ class DocTextDefaults(models.AbstractModel):
             else "системы"
         )
         # Build context-aware description from caption or generic fallback.
+        caption_val = getattr(menu, "caption", None)
         description = (
-            menu.caption
+            caption_val
             or (
                 "Данная функция открывает раздел «%s» и предоставляет "
                 "пользователю доступ к соответствующим данным и операциям "
@@ -205,7 +206,7 @@ class DocTextDefaults(models.AbstractModel):
             "в рамках его прав доступа." % title
         )
 
-        caption = "Экран раздела «%s»" % title
+        screenshot_caption = "Экран раздела «%s»" % title
 
         return {
             "name": title,
@@ -213,7 +214,7 @@ class DocTextDefaults(models.AbstractModel):
             "requirements": requirements,
             "steps": steps,
             "result": result,
-            "screenshot_caption": caption,
+            "screenshot_caption": screenshot_caption,
         }
 
     @staticmethod
@@ -262,11 +263,12 @@ class DocTextDefaults(models.AbstractModel):
                 "В открывшейся форме заполните или измените нужные поля. "
                 "Поля, отмеченные звёздочкой (*), являются обязательными."
             )
-            # Mention key fields when available
-            if menu.key_fields and menu.key_fields.strip():
+            # Safely access key_fields — field may not exist on older installs
+            key_fields = (getattr(menu, "key_fields", None) or "").strip()
+            if key_fields:
                 lines.append(
                     "Обратите особое внимание на ключевые поля формы: %s."
-                    % menu.key_fields.strip()
+                    % key_fields
                 )
             lines.append(
                 "После внесения изменений нажмите кнопку «Сохранить» "
@@ -385,7 +387,8 @@ class DocTextDefaults(models.AbstractModel):
             ("visible on current website", "«Visible on current website» — видимость на текущем сайте"),
         ]
 
-        key_fields_lower = (menu.key_fields or "").lower()
+        # Safely access key_fields — field may not exist on older installs
+        key_fields_lower = (getattr(menu, "key_fields", None) or "").lower()
         if key_fields_lower:
             found = [label for key, label in all_pairs if key in key_fields_lower]
         else:
