@@ -23,26 +23,23 @@ class DocModule(models.Model):
     description = fields.Text(string="Module Description")
 
     # --- User-manual metadata (mirrors the reference manual cover page) ----
-    # These drive the title page, the "Введение" and "Содержание" sections.
     system_name = fields.Char(
         string="System Name",
         help='Product name shown on the cover, e.g. Система "Smart OTM".',
     )
     manual_version = fields.Char(string="Manual Version", default="1.0")
     developer = fields.Char(
-        string="Developer", help='Shown as "Разработчик: ..." on the cover.'
+        string="Developer", help='Содержится в "Разработчик: ..." на обложке.'
     )
     city_year = fields.Char(
         string="City / Year",
-        help='Footer of the cover page, e.g. "Астана 2025".',
+        help='Нижняя часть обложки, например "Астана 2025".',
     )
     platform_version = fields.Char(
         string="Platform Version",
         default="Odoo 19",
-        help="Used in the 'Область применения' section.",
+        help="Используется в разделе 'Область применения'.",
     )
-    # Free-text intro blocks. Sensible Russian defaults are filled on creation
-    # so the export already matches the reference manual out of the box.
     intro_user_categories = fields.Text(string="1.1 User Categories")
     intro_scope = fields.Text(string="1.2 Scope")
     intro_purpose = fields.Text(string="1.3 Document Purpose")
@@ -72,7 +69,6 @@ class DocModule(models.Model):
         string="Functions", compute="_compute_counts", store=True
     )
 
-    # Rendered artefacts.
     markdown = fields.Text(string="Markdown Output")
     pdf_attachment_id = fields.Many2one("ir.attachment", string="PDF File")
     word_attachment_id = fields.Many2one("ir.attachment", string="Word File")
@@ -93,11 +89,7 @@ class DocModule(models.Model):
     # Manual content helpers
     # ------------------------------------------------------------------
     def apply_manual_defaults(self):
-        """Fill empty manual-metadata fields with sensible Russian defaults.
-
-        Mirrors the structure of the reference user manual so a freshly
-        collected module already exports a complete, well-formed document.
-        """
+        """Fill empty manual-metadata fields with sensible Russian defaults."""
         self.ensure_one()
         composer = self.env["doc.text.defaults"]
         defaults = composer.manual_defaults(self)
@@ -110,21 +102,47 @@ class DocModule(models.Model):
             self.write(values)
         return True
 
+    # ------------------------------------------------------------------
+    # Helper: does this menu have a form view?
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _menu_has_form(menu):
+        """Return True when the menu's view_modes include a form view.
+
+        A menu has a form view when:
+        - 'form' is explicitly listed in view_modes, OR
+        - view_modes is empty/absent (Odoo default includes list + form), OR
+        - the menu has a res_model (implies records that can be opened in form).
+        """
+        view_modes = [
+            v.strip()
+            for v in (menu.view_modes or "").split(",")
+            if v.strip()
+        ]
+        if not view_modes:
+            # No explicit modes set — Odoo default is list + form
+            return bool(menu.res_model)
+        return "form" in view_modes
+
     def build_functions_from_menus(self):
         """(Re)create doc.function entries from this module's menu tree.
 
-        One function is generated per documented screen. For menus whose
-        res_model is 'news.post' an additional 'Создание новости' function
-        is generated automatically with full field-by-field instructions.
-        Duplicate menus (same name + model + view_modes) are skipped. Menus
-        are sorted by sequence so the function numbering matches the UI order.
+        For every documented screen two functions are generated when the menu
+        opens a model with a form view:
+          1. «Просмотр списка»  — how to navigate to the list and search/filter
+          2. «Создание записи» — how to fill in the form and save a new record
+
+        Menus that only show read-only views (pivot, graph, calendar without
+        a model, pure containers) receive only function #1.
+
+        Duplicate menus (same name + model + view_modes) are skipped.
+        Menus are sorted by sequence so numbering matches the UI order.
         """
         self.ensure_one()
         self.function_ids.unlink()
         composer = self.env["doc.text.defaults"]
         number = 0
 
-        # Sort menus by sequence first, then by name, then by id as tie-breaker
         menus = self.menu_ids.sorted(
             key=lambda m: ((m.sequence or 999999), (m.complete_name or ""), m.id)
         )
@@ -148,6 +166,7 @@ class DocModule(models.Model):
                 continue
             seen.add(dedupe_key)
 
+            # --- Function 1: list / overview screen ---
             number += 1
             entry = composer.function_for_menu(menu, number)
             entry.update({
@@ -160,16 +179,15 @@ class DocModule(models.Model):
             })
             self.env["doc.function"].create(entry)
 
-            # For news.post screens: auto-generate a dedicated creation guide
-            if (menu.res_model or "").strip() == "news.post":
+            # --- Function 2: create / edit form (universal, not news.post-only) ---
+            if self._menu_has_form(menu):
                 number += 1
-                create_entry = composer.function_for_news_create(menu, number)
+                create_entry = composer.function_for_create(menu, number)
                 create_entry.update({
                     "doc_module_id": self.id,
                     "doc_menu_id": menu.id,
                     "sequence": number * 10,
                     "number": number,
-                    # Reuse the same screenshot — shows the form the user fills in
                     "screenshot": menu.screenshot or False,
                     "screenshot_source": "menu" if menu.screenshot else "none",
                 })
@@ -178,18 +196,11 @@ class DocModule(models.Model):
         return True
 
     def capture_screenshots(self, only_missing=True):
-        """Automatically capture screenshots for this module's screens.
-
-        Drives a headless browser (via :class:`doc.screenshot.capturer`) to
-        snapshot every documented screen and store each image on its matching
-        menu, then syncs them onto the functions. Manual uploads are preserved.
-        """
+        """Automatically capture screenshots for this module's screens."""
         self.ensure_one()
         result = self.env["doc.screenshot.capturer"].capture_module(
             self, only_missing=only_missing
         )
-        # Push freshly captured menu screenshots onto their functions so they
-        # render directly under each screen's text in the export.
         self.refresh_function_screenshots()
         return result
 
@@ -212,16 +223,9 @@ class DocModule(models.Model):
         }
 
     def refresh_function_screenshots(self):
-        """Copy the latest captured menu screenshots onto their functions.
-
-        Screenshots are produced asynchronously by the worker after functions
-        are first generated, so this re-sync is called right before exporting.
-        Manually uploaded screenshots are preserved and never overwritten.
-        """
+        """Copy the latest captured menu screenshots onto their functions."""
         self.ensure_one()
         for func in self.function_ids.filtered(lambda f: f.doc_menu_id):
-            # Respect hand-uploaded images: only auto-fill from the menu when
-            # the function was not given a manual screenshot.
             if func.screenshot_source == "manual":
                 continue
             menu = func.doc_menu_id
@@ -247,25 +251,14 @@ class DocModule(models.Model):
         return True
 
     def action_print_pdf_manual(self):
-        """Button: auto-capture missing screenshots, then print the PDF manual.
-
-        Running through a Python method (instead of a raw report action) lets
-        us refresh the screenshots first, so the PDF always contains the latest
-        image directly under each screen's text.
-        """
+        """Button: auto-capture missing screenshots, then print the PDF manual."""
         self.ensure_one()
         self._auto_capture_if_enabled()
         self.refresh_function_screenshots()
         return self.env.ref("dpf_docs.action_report_doc_module").report_action(self)
 
     def _auto_capture_if_enabled(self):
-        """Capture missing screenshots before an export, if auto-capture is on.
-
-        Controlled by the ``dpf_docs.auto_capture`` config parameter (default
-        on). Failures are swallowed so a capture problem never blocks the
-        document download -- screens simply export without an image, and any
-        manually uploaded screenshots are always preserved.
-        """
+        """Capture missing screenshots before an export, if auto-capture is on."""
         self.ensure_one()
         enabled = self.env["ir.config_parameter"].sudo().get_param(
             "dpf_docs.auto_capture", "1"
@@ -275,7 +268,7 @@ class DocModule(models.Model):
             return
         try:
             capturer.capture_module(self, only_missing=True)
-        except Exception:  # noqa: BLE001 - never block the export on capture
+        except Exception:  # noqa: BLE001
             _logger.warning(
                 "Auto-capture failed for module %s; exporting without new shots.",
                 self.technical_name, exc_info=True,
