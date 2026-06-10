@@ -241,7 +241,8 @@ class DocWordExport(models.AbstractModel):
     # 3. Список функций
     # ------------------------------------------------------------------
     def _add_functions_section(self, document, doc_modules):
-        document.add_page_break()
+        # NOTE: page_break removed here — the Heading 1 style already forces
+        # a new page in Word, and an explicit break was creating a blank page.
         self._heading(document, "3. Список функций", 1)
 
         figure = 0

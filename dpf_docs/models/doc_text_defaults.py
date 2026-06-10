@@ -262,6 +262,12 @@ class DocTextDefaults(models.AbstractModel):
                 "В открывшейся форме заполните или измените нужные поля. "
                 "Поля, отмеченные звёздочкой (*), являются обязательными."
             )
+            # Mention key fields when available
+            if menu.key_fields and menu.key_fields.strip():
+                lines.append(
+                    "Обратите особое внимание на ключевые поля формы: %s."
+                    % menu.key_fields.strip()
+                )
             lines.append(
                 "После внесения изменений нажмите кнопку «Сохранить» "
                 "(значок облака или кнопка в верхнем левом углу). "
@@ -288,3 +294,102 @@ class DocTextDefaults(models.AbstractModel):
         )
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # news.post — dedicated create / edit function
+    # ------------------------------------------------------------------
+    @api.model
+    def function_for_news_create(self, menu, number):
+        """Generate a dedicated 'Создание новости' function for news.post menus.
+
+        Called automatically from build_functions_from_menus() when the menu's
+        res_model is 'news.post'. Produces a full click-by-click instruction
+        set that explains every visible field on the news form.
+        """
+        module_name = (
+            menu.doc_module_id.name if menu.doc_module_id else "DPF News"
+        )
+        field_help = self._news_post_field_help(menu)
+
+        steps = [
+            "В главном меню системы найдите и нажмите на раздел «%s»." % module_name,
+            "В открывшемся разделе нажмите кнопку «New» (верхний левый угол), "
+            "чтобы создать новую новость.",
+            "В поле «Title» введите заголовок новости — он будет отображаться "
+            "на сайте и в списке публикаций.",
+            "В поле «Publication Date» задайте дату публикации материала.",
+            "На вкладке «Content» введите основной текст новости с помощью "
+            "встроенного редактора.",
+            "При необходимости добавьте изображения на вкладке «Images».",
+            "При необходимости настройте параметры отображения галереи "
+            "на вкладке «Gallery Settings».",
+            "Если требуется автоматическая публикация во внешних каналах, "
+            "включите переключатель «Auto-publish to Social Media».",
+            "Поле «Social Status» отображает текущий статус отправки новости "
+            "в социальные сети (например: Partially sent, Sent).",
+            "Убедитесь, что переключатель «Is Published» включён, если новость "
+            "должна быть видна на сайте.",
+            "Нажмите кнопку «Сохранить» (значок облака в верхнем левом углу), "
+            "чтобы записать новость в систему.",
+            "При необходимости нажмите кнопку «Open on Website» для проверки "
+            "отображения новости на сайте.",
+        ]
+
+        if field_help:
+            steps.append(
+                "Сводка ключевых полей формы: %s." % field_help
+            )
+
+        return {
+            "name": "Создание новости",
+            "description": (
+                "Функция предназначена для создания, редактирования и публикации "
+                "новости в системе %s. Пользователь заполняет карточку новости, "
+                "указывает дату публикации, основной текст, изображения и параметры "
+                "размещения в системе и на сайте." % module_name
+            ),
+            "requirements": (
+                "Пользователь должен быть авторизован в системе.\n"
+                "Пользователю должен быть предоставлен доступ к разделу «%s» и "
+                "право на создание или редактирование записей новостей. "
+                "При отсутствии доступа обратитесь к администратору системы."
+                % module_name
+            ),
+            "steps": "\n".join(steps),
+            "result": (
+                "Новая запись новости успешно создана и сохранена в системе. "
+                "Новость отображается в разделе «All Posts» и, при включённом "
+                "переключателе «Is Published», становится доступна на сайте "
+                "и в подключённых каналах публикации."
+            ),
+            "screenshot_caption": "Экран создания и редактирования новости",
+        }
+
+    @staticmethod
+    def _news_post_field_help(menu):
+        """Return a readable summary of key news.post field purposes.
+
+        Scans the menu's key_fields string (if any) and returns the matching
+        human-readable descriptions separated by semicolons. Falls back to the
+        full default set when key_fields is empty.
+        """
+        all_pairs = [
+            ("title",                    "«Title» — заголовок новости, отображается на сайте"),
+            ("publication date",         "«Publication Date» — дата публикации материала"),
+            ("is published",             "«Is Published» — признак видимости новости на сайте"),
+            ("can publish",              "«Can Publish» — право на публикацию для данного пользователя"),
+            ("website url",              "«Website URL» — относительная ссылка на страницу новости"),
+            ("website absolute url",     "«Website Absolute URL» — полный адрес страницы новости"),
+            ("social status",            "«Social Status» — статус отправки новости в социальные сети"),
+            ("auto-publish",             "«Auto-publish to Social Media» — автоматическая публикация в соцсети"),
+            ("visible on current website", "«Visible on current website» — видимость на текущем сайте"),
+        ]
+
+        key_fields_lower = (menu.key_fields or "").lower()
+        if key_fields_lower:
+            found = [label for key, label in all_pairs if key in key_fields_lower]
+        else:
+            # No key_fields stored — return the full default set
+            found = [label for _, label in all_pairs]
+
+        return "; ".join(found)

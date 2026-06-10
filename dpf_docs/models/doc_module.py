@@ -113,9 +113,11 @@ class DocModule(models.Model):
     def build_functions_from_menus(self):
         """(Re)create doc.function entries from this module's menu tree.
 
-        One function is generated per documented screen. Duplicate menus
-        (same name + model + view_modes) are skipped. Menus are sorted by
-        sequence so the function numbering matches the UI order.
+        One function is generated per documented screen. For menus whose
+        res_model is 'news.post' an additional 'Создание новости' function
+        is generated automatically with full field-by-field instructions.
+        Duplicate menus (same name + model + view_modes) are skipped. Menus
+        are sorted by sequence so the function numbering matches the UI order.
         """
         self.ensure_one()
         self.function_ids.unlink()
@@ -157,6 +159,22 @@ class DocModule(models.Model):
                 "screenshot_source": "menu" if menu.screenshot else "none",
             })
             self.env["doc.function"].create(entry)
+
+            # For news.post screens: auto-generate a dedicated creation guide
+            if (menu.res_model or "").strip() == "news.post":
+                number += 1
+                create_entry = composer.function_for_news_create(menu, number)
+                create_entry.update({
+                    "doc_module_id": self.id,
+                    "doc_menu_id": menu.id,
+                    "sequence": number * 10,
+                    "number": number,
+                    # Reuse the same screenshot — shows the form the user fills in
+                    "screenshot": menu.screenshot or False,
+                    "screenshot_source": "menu" if menu.screenshot else "none",
+                })
+                self.env["doc.function"].create(create_entry)
+
         return True
 
     def capture_screenshots(self, only_missing=True):
