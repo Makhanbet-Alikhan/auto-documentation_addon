@@ -167,7 +167,11 @@ class DocWordExport(models.AbstractModel):
         fld_end = OxmlElement("w:fldChar")
         fld_end.set(qn("w:fldCharType"), "end")
         r._r.extend([fld_begin, instr, fld_sep, hint, fld_end])
-        document.add_page_break()
+        # NOTE: page_break intentionally removed here.
+        # Heading 1 style in Word already forces a page break before the next
+        # section, so an explicit add_page_break() was creating a blank page
+        # between the TOC and section 1. Removing it also eliminates the large
+        # empty space at the bottom of the TOC page when there are few entries.
 
     # ------------------------------------------------------------------
     # Heading helpers

@@ -124,6 +124,16 @@ class DocModule(models.Model):
             return bool(menu.res_model)
         return "form" in view_modes
 
+    # ------------------------------------------------------------------
+    # Model-to-composer routing
+    # ------------------------------------------------------------------
+    # Maps res_model technical names to the composer method that generates
+    # the best create/edit function description for that model.
+    # Add new entries here when a module needs a dedicated create function.
+    _CREATE_FUNCTION_ROUTER = {
+        "news.post": "function_for_news_create",
+    }
+
     def build_functions_from_menus(self):
         """(Re)create doc.function entries from this module's menu tree.
 
@@ -131,6 +141,10 @@ class DocModule(models.Model):
         opens a model with a form view:
           1. «Просмотр списка»  — how to navigate to the list and search/filter
           2. «Создание записи» — how to fill in the form and save a new record
+
+        The create function is routed through _CREATE_FUNCTION_ROUTER so that
+        models with dedicated descriptions (e.g. news.post) get their rich,
+        per-field instructions instead of the generic fallback.
 
         Menus that only show read-only views (pivot, graph, calendar without
         a model, pure containers) receive only function #1.
@@ -179,10 +193,16 @@ class DocModule(models.Model):
             })
             self.env["doc.function"].create(entry)
 
-            # --- Function 2: create / edit form (universal, not news.post-only) ---
+            # --- Function 2: create / edit form ---
             if self._menu_has_form(menu):
                 number += 1
-                create_entry = composer.function_for_create(menu, number)
+                # Route to a model-specific composer method when available,
+                # otherwise fall back to the generic function_for_create().
+                res_model = (menu.res_model or "").strip()
+                composer_method = self._CREATE_FUNCTION_ROUTER.get(
+                    res_model, "function_for_create"
+                )
+                create_entry = getattr(composer, composer_method)(menu, number)
                 create_entry.update({
                     "doc_module_id": self.id,
                     "doc_menu_id": menu.id,
