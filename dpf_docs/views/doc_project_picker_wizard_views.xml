@@ -8,13 +8,13 @@
             <form string="Выберите проект">
                 <group>
                     <field name="generation_id" invisible="1"/>
-                    <field name="project_m2o"
-                           string="Проект"
-                           options="{'no_create': True, 'no_open': True}"
-                           placeholder="Начните вводить название проекта..."
-                           autofocus="1"/>
-                    <field name="project_id_int" invisible="1"/>
-                    <field name="project_name" invisible="1"/>
+                    <field name="project_name_selection"
+                           string="Выбрать из списка"
+                           help="Выберите проект из выпадающего списка"/>
+                    <field name="project_name"
+                           string="Название проекта"
+                           placeholder="Или введите название вручную..."
+                           help="Название будет резолвировано в ID проекта через ilike-поиск"/>
                 </group>
                 <footer>
                     <button name="action_confirm" type="object"
