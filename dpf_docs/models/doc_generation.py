@@ -77,7 +77,6 @@ class DocGeneration(models.Model):
             raise UserError(_("Модуль 'project' не установлен в данной системе."))
         wizard = self.env['doc.project.picker.wizard'].create({
             'generation_id': self.id,
-            'project_id_int': self.project_task_project_id or 0,
             'project_name': self.project_task_project_name or '',
         })
         return {
