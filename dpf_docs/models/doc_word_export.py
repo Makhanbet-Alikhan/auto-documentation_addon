@@ -100,7 +100,7 @@ class DocWordExport(models.AbstractModel):
     def _add_cover(self, document, modules):
         m = modules[:1]
         system_name = (m.system_name if m else None) or (
-            'Система "%s"' % (m.name if m else "Odoo")
+            '\u0421\u0438\u0441\u0442\u0435\u043c\u0430 "%s"' % (m.name if m else "Odoo")
         )
         platform = (m.platform_version if m else None) or "Odoo 19"
         version = (m.manual_version if m else None) or "1.0"
@@ -111,16 +111,16 @@ class DocWordExport(models.AbstractModel):
             document.add_paragraph()
 
         self._centered(document, system_name, size=18)
-        self._centered(document, 'на базе платформы "%s"' % platform, size=16)
+        self._centered(document, '\u043d\u0430 \u0431\u0430\u0437\u0435 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u044b "%s"' % platform, size=16)
         document.add_paragraph()
-        self._centered(document, "Руководство пользователя", bold=True, size=18)
-        self._centered(document, "Версия %s" % version, size=14)
+        self._centered(document, "\u0420\u0443\u043a\u043e\u0432\u043e\u0434\u0441\u0442\u0432\u043e \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f", bold=True, size=18)
+        self._centered(document, "\u0412\u0435\u0440\u0441\u0438\u044f %s" % version, size=14)
 
         for _ in range(4):
             document.add_paragraph()
 
         if developer:
-            self._centered(document, "Разработчик: %s" % developer, size=12)
+            self._centered(document, "\u0420\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a: %s" % developer, size=12)
 
         for _ in range(6):
             document.add_paragraph()
@@ -145,7 +145,7 @@ class DocWordExport(models.AbstractModel):
     def _add_toc(self, document):
         h = document.add_paragraph()
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = h.add_run("ОГЛАВЛЕНИЕ")
+        run = h.add_run("\u041e\u0413\u041b\u0410\u0412\u041b\u0415\u041d\u0418\u0415")
         run.bold = True
         run.font.size = Pt(14)
         document.add_paragraph()
@@ -161,8 +161,8 @@ class DocWordExport(models.AbstractModel):
         fld_sep.set(qn("w:fldCharType"), "separate")
         hint = OxmlElement("w:t")
         hint.text = (
-            "Оглавление обновляется автоматически: "
-            "правый клик → «Обновить поле»."
+            "\u041e\u0433\u043b\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438: "
+            "\u043f\u0440\u0430\u0432\u044b\u0439 \u043a\u043b\u0438\u043a \u2192 \u00ab\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u043f\u043e\u043b\u0435\u00bb."
         )
         fld_end = OxmlElement("w:fldChar")
         fld_end.set(qn("w:fldCharType"), "end")
@@ -211,18 +211,18 @@ class DocWordExport(models.AbstractModel):
     # ------------------------------------------------------------------
     def _add_intro_section(self, document, modules):
         m = modules[:1]
-        self._heading(document, "1. Введение", 1)
+        self._heading(document, "1. \u0412\u0432\u0435\u0434\u0435\u043d\u0438\u0435", 1)
 
-        self._heading(document, "1.1. Описание категорий пользователей", 2)
+        self._heading(document, "1.1. \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0439 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439", 2)
         self._bullets(document, m.intro_user_categories if m else "")
 
-        self._heading(document, "1.2. Область применения", 2)
+        self._heading(document, "1.2. \u041e\u0431\u043b\u0430\u0441\u0442\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u044f", 2)
         self._bullets(document, m.intro_scope if m else "")
 
-        self._heading(document, "1.3. Назначение документа", 2)
+        self._heading(document, "1.3. \u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430", 2)
         self._paragraph(document, m.intro_purpose if m else "")
 
-        self._heading(document, "1.4. Соглашения", 2)
+        self._heading(document, "1.4. \u0421\u043e\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u044f", 2)
         self._bullets(document, m.intro_conventions if m else "")
 
     # ------------------------------------------------------------------
@@ -230,15 +230,15 @@ class DocWordExport(models.AbstractModel):
     # ------------------------------------------------------------------
     def _add_content_section(self, document, modules):
         m = modules[:1]
-        self._heading(document, "2. Содержание документа", 1)
+        self._heading(document, "2. \u0421\u043e\u0434\u0435\u0440\u0436\u0430\u043d\u0438\u0435 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430", 1)
 
-        self._heading(document, "2.1. Назначение", 2)
+        self._heading(document, "2.1. \u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435", 2)
         self._paragraph(document, m.content_purpose if m else "")
 
-        self._heading(document, "2.2. Необходимые материалы", 2)
+        self._heading(document, "2.2. \u041d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u044b\u0435 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b", 2)
         self._bullets(document, m.content_materials if m else "")
 
-        self._heading(document, "2.3. Подготовка к работе", 2)
+        self._heading(document, "2.3. \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043a \u0440\u0430\u0431\u043e\u0442\u0435", 2)
         self._numbered_lines(document, m.content_preparation if m else "")
 
     # ------------------------------------------------------------------
@@ -247,7 +247,7 @@ class DocWordExport(models.AbstractModel):
     def _add_functions_section(self, document, doc_modules):
         # NOTE: page_break removed here — the Heading 1 style already forces
         # a new page in Word, and an explicit break was creating a blank page.
-        self._heading(document, "3. Список функций", 1)
+        self._heading(document, "3. \u0421\u043f\u0438\u0441\u043e\u043a \u0444\u0443\u043d\u043a\u0446\u0438\u0439", 1)
 
         figure = 0
         sub = 0
@@ -261,7 +261,7 @@ class DocWordExport(models.AbstractModel):
             )
             if not funcs:
                 p = document.add_paragraph()
-                r = p.add_run("Функции для данного модуля не сформированы.")
+                r = p.add_run("\u0424\u0443\u043d\u043a\u0446\u0438\u0438 \u0434\u043b\u044f \u0434\u0430\u043d\u043d\u043e\u0433\u043e \u043c\u043e\u0434\u0443\u043b\u044f \u043d\u0435 \u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u044b.")
                 r.font.color.rgb = _grey()
                 r.italic = True
                 continue
@@ -274,17 +274,17 @@ class DocWordExport(models.AbstractModel):
         # Функция N: Title
         title_p = document.add_paragraph()
         title_p.paragraph_format.space_before = Pt(10)
-        r = title_p.add_run("Функция %d: %s." % (func.number or 0, func.name or ""))
+        r = title_p.add_run("\u0424\u0443\u043d\u043a\u0446\u0438\u044f %d: %s." % (func.number or 0, func.name or ""))
         r.bold = True
         r.font.size = Pt(12)
 
         # Описание
-        self._labelled(document, "Описание:", func.description)
+        self._labelled(document, "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435:", func.description)
 
         # Требования (red text)
         if func.requirements and func.requirements.strip():
             p = document.add_paragraph()
-            lbl = p.add_run("Требования: ")
+            lbl = p.add_run("\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f: ")
             lbl.bold = True
             val = p.add_run(func.requirements.strip())
             val.font.color.rgb = _red()
@@ -293,7 +293,7 @@ class DocWordExport(models.AbstractModel):
         steps = func.step_lines() if hasattr(func, "step_lines") else []
         if steps:
             p = document.add_paragraph()
-            p.add_run("Порядок выполнения:").bold = True
+            p.add_run("\u041f\u043e\u0440\u044f\u0434\u043e\u043a \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f:").bold = True
             for idx, step in enumerate(steps, 1):
                 sp = document.add_paragraph()
                 sp.paragraph_format.left_indent = Pt(18)
@@ -306,7 +306,7 @@ class DocWordExport(models.AbstractModel):
             figure = self._add_screenshot_placeholder(document, func, figure)
 
         # Результат
-        self._labelled(document, "Результат:", func.result)
+        self._labelled(document, "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442:", func.result)
 
         # Separator
         sep = document.add_paragraph()
@@ -333,7 +333,7 @@ class DocWordExport(models.AbstractModel):
             cap_p = document.add_paragraph()
             cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             caption_text = func.screenshot_caption or func.name or ""
-            cap_r = cap_p.add_run("Рис.%d %s" % (figure, caption_text))
+            cap_r = cap_p.add_run("\u0420\u0438\u0441.%d %s" % (figure, caption_text))
             cap_r.font.size = Pt(10)
             cap_r.italic = True
         except Exception as exc:  # pragma: no cover
@@ -343,16 +343,16 @@ class DocWordExport(models.AbstractModel):
         return figure
 
     def _add_screenshot_placeholder(self, document, func, figure):
-        """Вставить текстовую заглушку вместо скриншота."""
+        """\u0412\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0442\u0435\u043a\u0441\u0442\u043e\u0432\u0443\u044e \u0437\u0430\u0433\u043b\u0443\u0448\u043a\u0443 \u0432\u043c\u0435\u0441\u0442\u043e \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442\u0430."""
         figure += 1
-        name = func.name or "экрана"
+        name = func.name or "\u044d\u043a\u0440\u0430\u043d\u0430"
         caption_text = func.screenshot_caption or name
 
         # Grey bordered placeholder block
         p = document.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(
-            "📌 [Здесь должен быть скриншот экрана «%s»]"
+            "\ud83d\udccc [\u0417\u0434\u0435\u0441\u044c \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u044d\u043a\u0440\u0430\u043d\u0430 \u00ab%s\u00bb]"
             % name
         )
         r.font.color.rgb = _grey()
@@ -362,7 +362,7 @@ class DocWordExport(models.AbstractModel):
         # Caption line below placeholder
         cap_p = document.add_paragraph()
         cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cap_r = cap_p.add_run("Рис.%d %s" % (figure, caption_text))
+        cap_r = cap_p.add_run("\u0420\u0438\u0441.%d %s" % (figure, caption_text))
         cap_r.font.size = Pt(10)
         cap_r.italic = True
         cap_r.font.color.rgb = _grey()
@@ -373,12 +373,18 @@ class DocWordExport(models.AbstractModel):
     # 4. Литература / 5. Словарь
     # ------------------------------------------------------------------
     def _add_bibliography_section(self, document, modules):
+        """Render section 4 (Bibliography).
+
+        NOTE: document.add_page_break() was removed from here.
+        Heading 1 style in Word already inserts a page break before
+        the heading, so an explicit break was creating a blank page
+        between section 3 and section 4.
+        """
         m = modules[:1]
-        document.add_page_break()
-        self._heading(document, "4. Литература", 1)
+        self._heading(document, "4. \u041b\u0438\u0442\u0435\u0440\u0430\u0442\u0443\u0440\u0430", 1)
         self._bullets(document, m.bibliography if m else "")
 
     def _add_glossary_section(self, document, modules):
         m = modules[:1]
-        self._heading(document, "5. Словарь терминов", 1)
+        self._heading(document, "5. \u0421\u043b\u043e\u0432\u0430\u0440\u044c \u0442\u0435\u0440\u043c\u0438\u043d\u043e\u0432", 1)
         self._bullets(document, m.glossary if m else "")
