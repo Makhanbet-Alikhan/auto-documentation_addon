@@ -29,6 +29,8 @@ _SECTION_RE = re.compile(
     r'^\s*(?P<key>Описание|Требования|Порядок|Результат)\s*:?\s*$',
     flags=re.UNICODE | re.IGNORECASE,
 )
+# Detects auto-generated "Создание записи" function names
+_CREATE_RE = re.compile(r'создание\s+записи', flags=re.UNICODE | re.IGNORECASE)
 
 
 def _normalize(text):
@@ -38,6 +40,14 @@ def _normalize(text):
     text = _NOISE_RE.sub(' ', text)
     text = text.lower().strip()
     return re.sub(r'\s+', ' ', text)
+
+
+def _clean_tag(text):
+    """Strip leading [tag] prefix and whitespace."""
+    if not text:
+        return ''
+    m = _TAG_RE.match(text)
+    return text[m.end():].strip() if m else text.strip()
 
 
 def _similarity(a, b):
@@ -309,24 +319,54 @@ class DocProjectEnricher(models.AbstractModel):
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
-    def _best_subtask_match(self, name, subtasks, threshold=0.30):
+    def _best_subtask_match(self, name, subtasks, threshold=0.30, extra_names=None):
+        """Find the best matching subtask for a given name using Jaccard similarity.
+
+        Args:
+            name: The function or menu name to match against subtasks.
+            subtasks: Recordset of project.task to search in.
+            threshold: Minimum score to consider a match.
+            extra_names: Additional name variants to try (e.g. menu parent names).
+                         Each extra name is tried with a slightly lower threshold
+                         (threshold - 0.10, min 0.15) to allow softer semantic matches
+                         when the primary name is a technical/English term.
+        """
         best_task = None
         best_score = 0.0
+
+        # Build list of query names to try: primary + extras
+        names_to_try = [(name or '', threshold)]
+        for extra in (extra_names or []):
+            if extra and extra.strip():
+                names_to_try.append((extra.strip(), max(threshold - 0.10, 0.15)))
+
         for subtask in subtasks:
-            score = _similarity(subtask.name or '', name or '')
-            m = _TAG_RE.match(subtask.name or '')
-            if m:
-                clean_name = (subtask.name or '')[m.end():].strip()
-                score = max(score, _similarity(clean_name, name or ''))
-            if score > best_score:
-                best_score = score
-                best_task = subtask
+            task_name_raw = subtask.name or ''
+            task_name_clean = _clean_tag(task_name_raw)
+
+            for query, thr in names_to_try:
+                # Score against raw task name
+                score = _similarity(task_name_raw, query)
+                # Score against tag-stripped task name (usually higher for [tag] prefixed tasks)
+                score = max(score, _similarity(task_name_clean, query))
+
+                if score > best_score:
+                    best_score = score
+                    best_task = subtask
+
+        # Determine effective threshold: use the minimum threshold across all tried names
+        # so that a match via extra_names (lower thr) can still win
+        effective_threshold = min(t for _, t in names_to_try)
+
         if best_task:
             _logger.info(
-                '_best_subtask_match: func/menu="%s" -> best task="%s" score=%.2f (threshold=%.2f) match=%s',
-                name, best_task.name, best_score, threshold, best_score >= threshold,
+                '_best_subtask_match: func/menu="%s" -> best task="%s" score=%.2f '
+                '(threshold=%.2f effective=%.2f) match=%s',
+                name, best_task.name, best_score,
+                threshold, effective_threshold,
+                best_score >= effective_threshold,
             )
-        return (best_task, best_score) if best_score >= threshold else (None, 0.0)
+        return (best_task, best_score) if best_score >= effective_threshold else (None, 0.0)
 
     def _parse_subtask_sections(self, plain_text):
         result = {'description': '', 'requirements': '', 'steps': '', 'result': ''}
@@ -411,8 +451,36 @@ class DocProjectEnricher(models.AbstractModel):
         return True
 
     def _enrich_function(self, func, subtasks, overwrite=False, threshold=0.30):
+        """Enrich a doc.function from the best matching project subtask.
+
+        For auto-generated 'Создание записи «X»' functions the primary name
+        has very low similarity to Russian task names because X is an English
+        model/menu slug.  We therefore collect extra_names from the function's
+        linked menu hierarchy so the matcher can use the Russian menu name
+        (e.g. 'Управление мероприятиями') as an additional signal.
+        """
+        func_name = func.name or ''
+
+        # Build extra name hints from the linked menu chain
+        extra_names = []
+        menu = getattr(func, 'menu_id', None)
+        if menu:
+            # Use the human-readable menu name and its parent segments
+            if menu.name:
+                extra_names.append(menu.name)
+            complete = getattr(menu, 'complete_name', '') or ''
+            for segment in complete.split('/'):
+                segment = segment.strip()
+                if segment and segment not in extra_names:
+                    extra_names.append(segment)
+
+        # For "Создание записи" functions also add the plain word "создание"
+        # so they can match tasks that contain "создание" + domain words
+        if _CREATE_RE.search(func_name):
+            extra_names.append('создание')
+
         best_task, _score = self._best_subtask_match(
-            func.name or '', subtasks, threshold=threshold
+            func_name, subtasks, threshold=threshold, extra_names=extra_names or None
         )
         if not best_task:
             return False
