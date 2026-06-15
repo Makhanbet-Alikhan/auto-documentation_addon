@@ -4,15 +4,15 @@
 A ``doc.generation`` record is one run: the user picks one or more installed
 modules, presses *Generate*, and this model coordinates the whole pipeline:
 
-1. introspect the ORM (menus, actions, fields)         -> doc.introspector
-2. parse the source code (docstrings, comments)         -> doc.source.parser
-3. compose texts (deterministic, optional LLM)          -> services.text_composer
-4. persist doc.module / doc.menu / doc.model.info
-5. [NEW] enrich from project.task (best-effort)         -> doc.project.enricher
-6. render Markdown / PDF / Word                         -> _render_markdown / report
-
-Screenshots are NOT captured automatically. Placeholder text is inserted
-instead so that a human can later paste real images from an external tool.
+1. Introspect the ORM (menus, actions, fields)         -> doc.introspector
+2. Parse the source code (docstrings, comments)         -> doc.source.parser
+3. Compose texts (deterministic, optional LLM)          -> services.text_composer
+4. Persist doc.module / doc.menu / doc.model.info
+5. Apply manual defaults (fills empty fields)
+6. Build doc.function from menus
+7. Enrich from project.task (best-effort)               -> doc.project.enricher
+   NOTE: enrichment runs AFTER build_functions_from_menus so that
+   doc.function records already exist when Pass 3 runs.
 """
 import base64
 import logging
@@ -24,7 +24,6 @@ from ..services import text_composer
 
 _logger = logging.getLogger(__name__)
 
-# Placeholder shown in every output format instead of a real screenshot.
 _SCREENSHOT_PLACEHOLDER = (
     "📌 [Здесь должен быть скриншот экрана «%s»]"
 )
@@ -66,18 +65,33 @@ class DocGeneration(models.Model):
     )
     use_llm_caption = fields.Boolean(
         string="Использовать LLM-подписи",
-        help="Если включено, внешний воркер может подписывать скриншоты через Vision LLM.",
     )
     enrich_from_project = fields.Boolean(
         string="Обогатить из Project Tasks",
         default=True,
-        help=(
-            "Если включено, автодокументатор попытается найти задачи проекта "
-            "с тегом [module_name] и импортировать их описания в документацию. "
-            "Работает только если модуль Project установлен. "
-            "Не перезаписывает вручную заполненные поля."
-        ),
     )
+
+    # ------------------------------------------------------------------
+    # Onchange: auto-fill run name from selected module
+    # ------------------------------------------------------------------
+    @api.onchange('module_ids')
+    def _onchange_module_ids(self):
+        """Auto-fill 'name' from the first selected module's display name.
+
+        Only fires when the current name is still the default placeholder
+        or empty, so manual edits are never overwritten.
+        """
+        default_name = _("Новый запуск")
+        current_name = (self.name or '').strip()
+        # Don't overwrite if the user already typed a custom name
+        if current_name and current_name != default_name:
+            return
+        if not self.module_ids:
+            return
+        first_module = self.module_ids[:1]
+        auto_name = first_module.shortdesc or first_module.name or ''
+        if auto_name:
+            self.name = auto_name
 
     # ------------------------------------------------------------------
     # Step 1-4: collect texts + structure
@@ -95,7 +109,7 @@ class DocGeneration(models.Model):
         self.ensure_one()
         modules = self._resolve_module_names()
         if not modules:
-            raise UserError(_("Выберите хотя бы один модуль для документирования."))
+            raise UserError_("Выберите хотя бы один модуль для документирования.")
 
         introspector = self.env["doc.introspector"]
         parser = self.env["doc.source.parser"]
@@ -110,14 +124,15 @@ class DocGeneration(models.Model):
     def _collect_one_module(self, module_name, introspector, parser):
         """Build a single doc.module with its menus and models.
 
-        Pipeline:
-        1. Introspect ORM — menus, fields, views
-        2. Parse source — docstrings, field comments
+        Pipeline order:
+        1. Introspect ORM
+        2. Parse source
         3. Compose initial texts
         4. Persist doc.module / doc.menu / doc.model.info
-        5. [NEW] Enrich from project.task (best-effort, non-destructive)
-        6. Apply manual defaults (fills still-empty fields)
-        7. Build doc.function from menus
+        5. Apply manual defaults (fills still-empty fields)
+        6. Build doc.function from menus          <-- functions created here
+        7. Enrich from project.task               <-- enricher runs AFTER
+           so that doc.function records exist when Pass 3 executes
         """
         ir_module = self.env["ir.module.module"].search(
             [("name", "=", module_name)], limit=1
@@ -144,7 +159,13 @@ class DocGeneration(models.Model):
         self._build_menus(doc_module, module_name, introspector)
         self._build_models(doc_module, module_name, introspector, parser, parsed)
 
-        # Step 5: enrich from project.task (best-effort)
+        # Step 5: apply defaults to fill still-empty metadata fields
+        doc_module.apply_manual_defaults()
+
+        # Step 6: build functions from menus (MUST happen before enrichment)
+        doc_module.build_functions_from_menus()
+
+        # Step 7: enrich from project.task — runs AFTER functions are created
         if self.enrich_from_project:
             try:
                 enricher = self.env['doc.project.enricher']
@@ -159,12 +180,9 @@ class DocGeneration(models.Model):
                     module_name, exc_info=True
                 )
 
-        doc_module.apply_manual_defaults()
-        doc_module.build_functions_from_menus()
         return doc_module
 
     def _build_menus(self, doc_module, module_name, introspector):
-        """Create doc.menu records from the module's menu tree."""
         nodes = introspector.get_menu_tree(module_name)
         for node in nodes:
             res_model = node.get("res_model")
@@ -172,7 +190,6 @@ class DocGeneration(models.Model):
             caption = text_composer.compose_menu_caption(
                 node["name"], res_model, node.get("view_modes"), fields_meta
             )
-            has_action = bool(node.get("web_url"))
             self.env["doc.menu"].create({
                 "doc_module_id": doc_module.id,
                 "menu_xmlid": node.get("complete_name"),
@@ -186,12 +203,10 @@ class DocGeneration(models.Model):
                 "web_url": node.get("web_url") or False,
                 "caption": caption,
                 "caption_source": 'generated',
-                # Never auto-capture: screenshots are inserted manually.
                 "capture_state": "skipped",
             })
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
-        """Create doc.model.info records with merged field tables."""
         for minfo in introspector.get_module_models(module_name):
             res_model = minfo["model"]
             fields_meta = introspector.get_fields_meta(res_model)
@@ -232,15 +247,12 @@ class DocGeneration(models.Model):
         return out
 
     # ------------------------------------------------------------------
-    # Markdown rendering — user-friendly style
+    # Markdown rendering
     # ------------------------------------------------------------------
     @api.model
     def _render_markdown(self, doc_module):
-        """Рендер одного doc.module в Markdown в стиле руководства пользователя."""
         lines = []
         title = doc_module.name or doc_module.technical_name
-
-        # ---- Титул ----
         lines.append("# Руководство пользователя")
         lines.append("## %s" % title)
         if doc_module.system_name:
@@ -251,11 +263,9 @@ class DocGeneration(models.Model):
         if doc_module.city_year:
             lines.append("> %s" % doc_module.city_year)
         lines.append("")
-
-        # ---- 1. Введение ----
         lines.append("## 1. Введение")
         if doc_module.intro_user_categories:
-            lines.append("### 1.1 Описание категорий пользователей")
+            lines.append("### 1.1 Категории пользователей")
             for line in doc_module.intro_user_categories.splitlines():
                 if line.strip():
                     lines.append("- %s" % line.strip())
@@ -276,8 +286,6 @@ class DocGeneration(models.Model):
                 if line.strip():
                     lines.append("- %s" % line.strip())
             lines.append("")
-
-        # ---- 2. Содержание документа ----
         lines.append("## 2. Содержание документа")
         if doc_module.content_purpose:
             lines.append("### 2.1 Назначение")
@@ -290,14 +298,12 @@ class DocGeneration(models.Model):
                     lines.append("- %s" % line.strip())
             lines.append("")
         if doc_module.content_preparation:
-            lines.append("### 2.3 Подготовка к работе")
+            lines.append("### 2.3 Подготовка")
             for i, line in enumerate(
                 [l for l in doc_module.content_preparation.splitlines() if l.strip()], 1
             ):
                 lines.append("%d. %s" % (i, line.strip()))
             lines.append("")
-
-        # ---- 3. Список функций ----
         lines.append("## 3. Список функций")
         lines.append("")
         for func in doc_module.function_ids:
@@ -315,7 +321,6 @@ class DocGeneration(models.Model):
                 for i, step in enumerate(steps, 1):
                     lines.append("%d. %s" % (i, step))
                 lines.append("")
-            # Screenshot placeholder — no auto-capture.
             lines.append("> %s" % (_SCREENSHOT_PLACEHOLDER % (func.name or "")))
             lines.append("")
             if func.result:
@@ -323,18 +328,14 @@ class DocGeneration(models.Model):
             lines.append("")
             lines.append("---")
             lines.append("")
-
-        # ---- Таблицы полей (приложение) ----
         if doc_module.model_ids:
             lines.append("## Приложение. Описание полей")
             lines.append("")
             for model in doc_module.model_ids:
-                lines.append(
-                    "### %s — %s" % (
-                        model.display_name or model.technical_name,
-                        "`%s`" % model.technical_name,
-                    )
-                )
+                lines.append("### %s — %s" % (
+                    model.display_name or model.technical_name,
+                    "`%s`" % model.technical_name,
+                ))
                 if model.description:
                     lines.append(model.description.strip())
                     lines.append("")
@@ -351,27 +352,21 @@ class DocGeneration(models.Model):
                             (r.get("help") or "").replace("\n", " ").replace("|", "\\|"),
                         ))
                     lines.append("")
-
-        # ---- 4. Литература ----
         if doc_module.bibliography:
             lines.append("## 4. Литература")
             for line in doc_module.bibliography.splitlines():
                 if line.strip():
                     lines.append("- %s" % line.strip())
             lines.append("")
-
-        # ---- 5. Словарь ----
         if doc_module.glossary:
             lines.append("## 5. Словарь терминов")
             for line in doc_module.glossary.splitlines():
                 if line.strip():
                     lines.append("- %s" % line.strip())
             lines.append("")
-
         return "\n".join(lines)
 
     def action_render_all(self):
-        """Рендер Markdown для каждого задокументированного модуля."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
             doc_module.markdown = self._render_markdown(doc_module)
@@ -379,7 +374,8 @@ class DocGeneration(models.Model):
         return True
 
     def action_capture_screenshots(self):
-        """Кнопка оставлена для совместимости. Скриншоты загружаются вручную."""
+        """Notification about manual screenshot upload. sticky=False so it
+        auto-dismisses after ~5 seconds."""
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
@@ -387,16 +383,14 @@ class DocGeneration(models.Model):
                 "title": _("Скриншоты"),
                 "message": _(
                     "Автоматический захват отключён. Загрузите скриншоты вручную: "
-                    "откройте задокументированный модуль ➜ вкладка «Функции» ➜ "
-                    "откройте функцию ➜ поле «Скриншот»."
+                    "откройте модуль → вкладка «Функции» → откройте функцию → поле «Скриншот»."
                 ),
                 "type": "info",
-                "sticky": True,
+                "sticky": False,
             },
         }
 
     def action_print_pdf(self):
-        """Печать PDF-отчёта для задокументированных модулей."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
@@ -405,10 +399,9 @@ class DocGeneration(models.Model):
         )
 
     def action_download_word(self):
-        """Сгенерировать Word-документ для всех задокументированных модулей."""
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
+            raise UserError_("Нечего экспортировать. Сначала выполните сбор текстов.")
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)
@@ -429,7 +422,6 @@ class DocGeneration(models.Model):
         }
 
     def get_worker_spec(self):
-        """Return the JSON spec the Playwright worker consumes (legacy)."""
         self.ensure_one()
         modules = []
         for doc_module in self.doc_module_ids:
@@ -446,7 +438,6 @@ class DocGeneration(models.Model):
 
     @api.model
     def _cron_dispatch_pending(self):
-        """Cron: log pending generations (no browser is started)."""
         pending = self.search([("state", "=", "awaiting_shots")])
         for gen in pending:
             remaining = sum(len(m.pending_screenshot_tasks()) for m in gen.doc_module_ids)
