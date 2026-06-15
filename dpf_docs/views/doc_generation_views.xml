@@ -13,11 +13,10 @@
                     <button name="action_enrich_from_tasks" type="object"
                             string="4. Enrich from Tasks"
                             invisible="state in ('draft',)"
-                            help="Re-run project.task enrichment on all collected modules. Use this after adding task descriptions or changing the project."/>
+                            help="Re-run project.task enrichment on all collected modules."/>
                     <button name="action_capture_screenshots" type="object"
                             string="2. Capture Screenshots" class="btn-primary"
-                            invisible="state not in ('awaiting_shots',)"
-                            help="Upload screenshots manually: open the module → Functions tab → open a function → Screenshot field."/>
+                            invisible="state not in ('awaiting_shots',)"/>
                     <button name="action_render_all" type="object"
                             string="3. Render Markdown"
                             invisible="state not in ('awaiting_shots',)"/>
@@ -37,9 +36,9 @@
                                    options="{'no_create': True}"/>
                             <field name="module_names"
                                    placeholder="optional: e.g. sale, my_addon"/>
-                            <field name="project_id"
-                                   options="{'no_create': True}"
-                                   placeholder="Необязательно: ЦПФ Этап 2"/>
+                            <field name="project_task_project_name"
+                                   placeholder="Необязательно: ЦПФ Этап 2"
+                                   help="Название проекта Odoo (не обязательно). Используется для поиска задач при обогащении."/>
                         </group>
                         <group>
                             <field name="use_llm_caption"/>
@@ -60,26 +59,24 @@
                         </page>
                         <page string="How it works">
                             <div class="alert alert-info" role="alert">
-                                <p><b>Step 1</b> — Collect Texts: introspects the ORM and
-                                parses Python docstrings/comments.</p>
-                                <p><b>Step 2</b> — Capture Screenshots: upload screenshots
-                                manually via Functions tab on each doc.module.</p>
+                                <p><b>Step 1</b> — Collect Texts.</p>
+                                <p><b>Step 2</b> — Capture Screenshots (upload manually).</p>
                                 <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.</p>
-                                <p><b>Step 4</b> — Enrich from Tasks: re-reads project.task
-                                descriptions and fills in function/menu fields. Run this
-                                any time after editing tasks. Scoped to the selected
-                                <i>Project</i> if set; otherwise searches all projects.</p>
-                                <p><b>Task discovery order:</b></p>
+                                <p><b>Step 4 — Enrich from Tasks</b>: re-reads project.task
+                                descriptions and fills function/menu fields. Run any time
+                                after editing tasks.</p>
+                                <p><b>Task discovery order (per module):</b></p>
                                 <ol>
-                                    <li>Tasks whose name starts with
-                                        <code>[module_technical_name]</code>
+                                    <li>Tasks starting with <code>[module_name]</code>
                                         e.g. <code>[dpf_news] Описание</code></li>
-                                    <li>Tasks whose name contains the module name
-                                        anywhere (e.g. "Новостной портал", "dpf news")</li>
-                                    <li>If a Project is selected and nothing found —
-                                        all tasks from that project are used as a
-                                        fallback (matched by name similarity)</li>
+                                    <li>Tasks containing the module name anywhere</li>
+                                    <li>If <i>Project</i> is set and nothing found —
+                                        all tasks from that project (matched by similarity)</li>
                                 </ol>
+                                <p>Sub-task sections: <code>Описание:</code>
+                                <code>Требования:</code>
+                                <code>Порядок:</code>
+                                <code>Результат:</code></p>
                             </div>
                         </page>
                     </notebook>
@@ -96,7 +93,7 @@
             <list string="Documentation Runs">
                 <field name="name"/>
                 <field name="module_ids" widget="many2many_tags"/>
-                <field name="project_id"/>
+                <field name="project_task_project_name"/>
                 <field name="state"/>
                 <field name="create_date"/>
             </list>

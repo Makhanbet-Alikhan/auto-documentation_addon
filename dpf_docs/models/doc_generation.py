@@ -33,13 +33,22 @@ class DocGeneration(models.Model):
         string="Дополнительные модули",
         help="Необязательно. Технические названия через запятую.",
     )
-    project_id = fields.Many2one(
-        'project.project',
-        string='Проект для обогащения',
+    # Soft dependency on project: stored as Integer + display name.
+    # This avoids a hard comodel reference to project.project which would
+    # crash if the project module is not installed.
+    project_task_project_id = fields.Integer(
+        string="ID Проекта",
+        default=0,
+        help="Internal: stores project.project id without a hard FK.",
+    )
+    project_task_project_name = fields.Char(
+        string="Проект для обогащения",
+        compute='_compute_project_name',
+        inverse='_inverse_project_name',
+        store=True,
         help=(
-            'Укажите Odoo-проект, в котором хранятся задачи с описаниями модулей. '
-            'Если указан — поиск ведётся в первую очередь внутри него. '
-            'Если задачи с префиксом [module_name] не найдены — берутся все сабтаски проекта.'
+            'Укажите название Odoo-проекта, в котором хранятся задачи '
+            'с описаниями модулей. Например: «ЦПФ Этап 2»'
         ),
     )
     state = fields.Selection(
@@ -61,6 +70,33 @@ class DocGeneration(models.Model):
         string="Обогатить из Project Tasks",
         default=True,
     )
+
+    # ------------------------------------------------------------------
+    # Compute / inverse for project name display
+    # ------------------------------------------------------------------
+    @api.depends('project_task_project_id')
+    def _compute_project_name(self):
+        for rec in self:
+            pid = rec.project_task_project_id
+            if pid and 'project.project' in self.env:
+                project = self.env['project.project'].sudo().browse(pid).exists()
+                rec.project_task_project_name = project.name if project else False
+            else:
+                rec.project_task_project_name = False
+
+    def _inverse_project_name(self):
+        """Resolve typed project name to project.project id (soft)."""
+        if 'project.project' not in self.env:
+            return
+        for rec in self:
+            name = (rec.project_task_project_name or '').strip()
+            if not name:
+                rec.project_task_project_id = 0
+                continue
+            project = self.env['project.project'].sudo().search(
+                [('name', 'ilike', name)], limit=1
+            )
+            rec.project_task_project_id = project.id if project else 0
 
     # ------------------------------------------------------------------
     # Onchange: auto-fill run name from selected module
@@ -106,17 +142,6 @@ class DocGeneration(models.Model):
         return True
 
     def _collect_one_module(self, module_name, introspector, parser):
-        """Build a single doc.module with its menus and models.
-
-        Pipeline order:
-        1. Introspect ORM
-        2. Parse source
-        3. Compose initial texts
-        4. Persist doc.module / doc.menu / doc.model.info
-        5. Apply manual defaults
-        6. Build doc.function from menus
-        7. Enrich from project.task (AFTER functions are created)
-        """
         ir_module = self.env["ir.module.module"].search(
             [("name", "=", module_name)], limit=1
         )
@@ -151,35 +176,21 @@ class DocGeneration(models.Model):
         return doc_module
 
     def _run_enrichment(self, doc_module, overwrite=False):
-        """Run project.task enrichment for a single doc.module. Non-fatal."""
         try:
             enricher = self.env['doc.project.enricher']
             stats = enricher.enrich_module(
                 doc_module,
                 overwrite=overwrite,
-                project_id=self.project_id.id if self.project_id else False,
+                project_id=self.project_task_project_id or False,
             )
-            _logger.info(
-                '_run_enrichment: module=%s stats=%s',
-                doc_module.technical_name, stats,
-            )
+            _logger.info('_run_enrichment: module=%s stats=%s', doc_module.technical_name, stats)
         except Exception:  # noqa: BLE001
             _logger.warning(
                 '_run_enrichment: failed for %s (non-fatal)',
                 doc_module.technical_name, exc_info=True,
             )
 
-    # ------------------------------------------------------------------
-    # NEW: manual re-enrichment button
-    # ------------------------------------------------------------------
     def action_enrich_from_tasks(self):
-        """Re-run project.task enrichment on all doc.module records.
-
-        Visible after Collect Texts (state != draft).
-        Does NOT re-collect menus/models, only overwrites empty task-fields.
-        Pass overwrite=True so that previously generated defaults get
-        replaced by real task content.
-        """
         self.ensure_one()
         if not self.doc_module_ids:
             raise UserError(_("Сначала выполните «1. Собрать тексты»."))
@@ -190,7 +201,7 @@ class DocGeneration(models.Model):
                 stats = enricher.enrich_module(
                     doc_module,
                     overwrite=True,
-                    project_id=self.project_id.id if self.project_id else False,
+                    project_id=self.project_task_project_id or False,
                 )
                 total['menus_enriched'] += stats.get('menus_enriched', 0)
                 total['functions_enriched'] += stats.get('functions_enriched', 0)
