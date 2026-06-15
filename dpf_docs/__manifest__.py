@@ -37,22 +37,16 @@ Architecture
     "website": "https://github.com/",
     "license": "LGPL-3",
     "depends": ["base", "web", "mail"],
-    # NOTE: 'python-docx' is only needed for the optional Word (.docx) export.
-    # It is intentionally NOT declared as a hard external dependency so the
-    # module installs without it. The import is lazy (see models/doc_word_export
-    # .py); if the package is missing, only the "Download Word" button raises a
-    # clear message asking to run: pip install python-docx
-    # "external_dependencies": {"python": ["docx"]},
     "data": [
         "security/doc_security.xml",
         "security/ir.model.access.csv",
         "data/doc_config_params.xml",
         "data/doc_cron.xml",
-        # Reports first: the QWeb template and its report action are referenced
-        # by buttons defined in the views below.
+        # Reports first
         "report/doc_report.xml",
         "report/doc_report_action.xml",
         "views/doc_generation_views.xml",
+        "views/doc_project_picker_wizard_views.xml",
         "views/doc_module_views.xml",
         "views/doc_menu_views.xml",
         "views/doc_menu_root.xml",

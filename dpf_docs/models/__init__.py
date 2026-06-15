@@ -12,3 +12,4 @@ from . import doc_function
 from . import doc_project_enricher
 from . import doc_module
 from . import doc_generation
+from . import doc_project_picker_wizard
