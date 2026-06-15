@@ -3,7 +3,7 @@
 
 Task structure expected in the project:
 
-  Project (e.g. «ЦПФ Этап 2»)
+  Project (е.г. «ЦПФ Этап 2»)
   └── [Main task] Разработка модулей ...   (main task, ~53 штуки)
        ├── [dpf_events] Создание мероприятий ...  (module parent task)
        │    ├── Subtask 1  (contains Описание/Требования/Порядок/Результат)
@@ -11,39 +11,6 @@ Task structure expected in the project:
        ├── [dpf_news] ...
        │    └── ...
        └── ...
-
-Discovery algorithm:
-
-  Step 1 — SUBTASK TAG SEARCH (primary, recommended)
-    Search ALL tasks in the project whose name starts with [module_name].
-    These are the "module parent tasks" (2nd level).
-    Their child_ids (subtasks) are used for enrichment.
-
-  Step 2 — DIRECT SUBTASK SEARCH
-    If Step 1 found module parent tasks but they have no children,
-    the module parent tasks themselves are treated as content tasks.
-
-  Step 3 — Fuzzy keyword fallback
-    If Step 1 found nothing, search tasks containing the module technical
-    name or display name anywhere in the name.
-
-  Step 4 — Project-wide fallback
-    If project_id is given and nothing found — ALL top-level tasks in that
-    project are pooled and their subtasks matched by Jaccard similarity.
-
-Sub-task description sections (improve field mapping):
-
-    Описание:
-    ...
-
-    Требования:
-    - ...
-
-    Порядок:
-    1. ...
-
-    Результат:
-    ...
 """
 import logging
 import re
@@ -53,7 +20,6 @@ from odoo import _, models
 
 _logger = logging.getLogger(__name__)
 
-# Matches "[module_name]" at the start of a task name, e.g. "[dpf_events] ..."
 _TAG_RE = re.compile(r'^\[([\w]+)\]\s*', flags=re.UNICODE)
 _NOISE_RE = re.compile(
     r'ТЗ|ТС|§[\d\.]+|§\d|\[.*?\]|["\u00ab\u00bb()/\\,\.\!\?\-\u2013\u2014]',
@@ -92,12 +58,6 @@ class DocProjectEnricher(models.AbstractModel):
     # ------------------------------------------------------------------
 
     def enrich_module(self, doc_module, overwrite=False, project_id=False):
-        """Enrich doc_module from project.task subtasks.
-
-        :param doc_module: doc.module record
-        :param overwrite: if True, overwrite existing non-empty fields
-        :param project_id: int id of project.project to scope the search
-        """
         stats = {
             'module_enriched': False,
             'menus_enriched': 0,
@@ -106,18 +66,21 @@ class DocProjectEnricher(models.AbstractModel):
         }
 
         if not self._project_installed():
+            _logger.warning('enrich_module: project module is NOT installed')
             return stats
 
         technical_name = doc_module.technical_name
         display_name = doc_module.name or ''
 
+        # --- DEBUG: dump first 10 tasks in the project so user can see structure ---
+        self._debug_dump_project_tasks(project_id, technical_name)
+
         # Step 1: find module-level parent tasks tagged [technical_name]
         module_parent_tasks = self._find_module_parent_tasks(
-            technical_name, project_id=project_id
+            technical_name, display_name=display_name, project_id=project_id
         )
 
         if module_parent_tasks:
-            # Collect subtasks of these module parent tasks
             subtasks = self.env['project.task'].browse()
             for parent in module_parent_tasks:
                 children = parent.child_ids.filtered(
@@ -125,7 +88,6 @@ class DocProjectEnricher(models.AbstractModel):
                 )
                 subtasks |= children
 
-            # If module parent tasks have no children, use them directly
             if not subtasks:
                 subtasks = self.env['project.task'].browse(
                     [t.id for t in module_parent_tasks]
@@ -136,11 +98,10 @@ class DocProjectEnricher(models.AbstractModel):
             )
 
             _logger.info(
-                'doc.project.enricher [TAG]: module=%s parent_tasks=%s subtasks=%s',
+                '[ENRICH TAG] module=%s parent_tasks=%s subtasks=%s',
                 technical_name, len(module_parent_tasks), len(subtasks),
             )
         else:
-            # Fallback: old fuzzy strategy
             subtasks = self._find_subtasks_fuzzy(
                 technical_name, display_name, project_id=project_id
             )
@@ -149,16 +110,24 @@ class DocProjectEnricher(models.AbstractModel):
                     doc_module, subtasks[0], overwrite=overwrite
                 )
             _logger.info(
-                'doc.project.enricher [FUZZY]: module=%s subtasks=%s',
+                '[ENRICH FUZZY] module=%s subtasks=%s',
                 technical_name, len(subtasks),
             )
 
         if not subtasks:
-            _logger.info(
-                'doc.project.enricher: no subtasks found for module=%s (project_id=%s)',
-                technical_name, project_id,
+            _logger.warning(
+                '[ENRICH] No subtasks found for module=%s (project_id=%s). '
+                'Check that tasks are named [%s] ... or contain the module name.',
+                technical_name, project_id, technical_name,
             )
             return stats
+
+        # Log the subtask pool being used
+        _logger.info(
+            '[ENRICH] Using %s subtasks for module=%s: %s',
+            len(subtasks), technical_name,
+            [t.name for t in list(subtasks)[:10]],
+        )
 
         for menu in doc_module.menu_ids:
             if self._enrich_menu_caption(menu, subtasks, overwrite=overwrite):
@@ -171,11 +140,34 @@ class DocProjectEnricher(models.AbstractModel):
                 stats['functions_enriched'] += 1
 
         _logger.info(
-            'doc.project.enricher: module=%s enriched=%s menus=%s functions=%s skipped=%s',
+            '[ENRICH] DONE module=%s: module_enriched=%s menus=%s functions=%s skipped=%s',
             technical_name, stats['module_enriched'],
             stats['menus_enriched'], stats['functions_enriched'], stats['skipped'],
         )
         return stats
+
+    # ------------------------------------------------------------------
+    # Debug helper
+    # ------------------------------------------------------------------
+
+    def _debug_dump_project_tasks(self, project_id, technical_name):
+        """Log first 20 task names in the project to help debug naming issues."""
+        if not project_id:
+            _logger.warning('[ENRICH DEBUG] project_id is False/0 — cannot search tasks!')
+            return
+        try:
+            tasks = self.env['project.task'].sudo().search(
+                [('project_id', '=', project_id), ('active', 'in', [True, False])],
+                limit=20, order='id asc',
+            )
+            _logger.info(
+                '[ENRICH DEBUG] project_id=%s, searching for module=%s. '
+                'First %s tasks in project: %s',
+                project_id, technical_name, len(tasks),
+                [t.name for t in tasks],
+            )
+        except Exception as e:
+            _logger.warning('[ENRICH DEBUG] Could not dump tasks: %s', e)
 
     # ------------------------------------------------------------------
     # Project check
@@ -191,62 +183,64 @@ class DocProjectEnricher(models.AbstractModel):
     # Task discovery
     # ------------------------------------------------------------------
 
-    def _find_module_parent_tasks(self, technical_name, project_id=False):
-        """Find tasks tagged [technical_name] anywhere in the project tree.
-
-        Searches ALL tasks (not just top-level) in the project whose name
-        starts with [technical_name]. This matches the structure:
-
-            [Main task] ...
-              └── [dpf_events] Описание ...   ← found here
-                   └── subtask 1
-                   └── subtask 2
-
-        The found tasks' child_ids are used as the subtask pool.
-        """
+    def _find_module_parent_tasks(self, technical_name, display_name='', project_id=False):
+        """Find tasks tagged [technical_name] OR matching display_name anywhere in the project."""
         try:
             Task = self.env['project.task'].sudo()
         except KeyError:
             return []
 
-        domain = [('active', 'in', [True, False])]
+        domain_base = [('active', 'in', [True, False])]
         if project_id:
-            domain.append(('project_id', '=', project_id))
+            domain_base.append(('project_id', '=', project_id))
 
-        # Search tasks whose name starts with [technical_name]
-        # Use ilike for case-insensitive, then filter exact tag
-        candidates_raw = Task.search(
-            [('name', 'ilike', '[%s]' % technical_name)] + domain
+        # Search 1: by [technical_name] tag in task name
+        candidates_tag = Task.search(
+            [('name', 'ilike', '[%s]' % technical_name)] + domain_base
+        )
+        _logger.info(
+            '_find_module_parent_tasks: tag search "[%s]" found %s candidates',
+            technical_name, len(candidates_tag),
         )
 
-        # Exact tag match: [technical_name] must be the FIRST tag
+        # Exact tag match
         result = []
-        for t in candidates_raw:
+        for t in candidates_tag:
             m = _TAG_RE.match(t.name or '')
             if m and m.group(1).lower() == technical_name.lower():
                 result.append(t)
+                _logger.info('  TAG MATCH: id=%s name=%s', t.id, t.name)
 
         if result:
-            # Prefer tasks with most children first
             result.sort(key=lambda t: (-len(t.child_ids), 0 if t.active else 1))
-            _logger.info(
-                '_find_module_parent_tasks: module=%s found=%s (project_id=%s)',
-                technical_name, len(result), project_id,
+            return result
+
+        # Search 2: by display_name (e.g. "DPF News" or "DPF Events")
+        if display_name:
+            candidates_dn = Task.search(
+                [('name', 'ilike', display_name)] + domain_base
             )
+            _logger.info(
+                '_find_module_parent_tasks: display_name search "%s" found %s candidates',
+                display_name, len(candidates_dn),
+            )
+            for t in candidates_dn:
+                if t not in result:
+                    result.append(t)
+                    _logger.info('  DISPLAY_NAME MATCH: id=%s name=%s', t.id, t.name)
+
+        if result:
+            result.sort(key=lambda t: (-len(t.child_ids), 0 if t.active else 1))
             return result
 
         _logger.info(
-            '_find_module_parent_tasks: module=%s — not found (project_id=%s)',
+            '_find_module_parent_tasks: module=%s — nothing found (project_id=%s)',
             technical_name, project_id,
         )
         return []
 
     def _find_subtasks_fuzzy(self, technical_name, display_name='', project_id=False):
-        """Fallback: find subtasks via keyword matching.
-
-        Returns a flat list of project.task records that can be used
-        as the subtask pool for enrichment.
-        """
+        """Fallback: find subtasks via keyword matching."""
         try:
             Task = self.env['project.task'].sudo()
         except KeyError:
@@ -266,18 +260,26 @@ class DocProjectEnricher(models.AbstractModel):
         parent_tasks = []
         for kw in keywords:
             found = Task.search([('name', 'ilike', kw)] + base_domain)
+            _logger.info(
+                '_find_subtasks_fuzzy: keyword="%s" found %s tasks: %s',
+                kw, len(found), [t.name for t in found[:5]],
+            )
             for t in found:
                 if t.id not in seen_ids:
                     seen_ids.add(t.id)
                     parent_tasks.append(t)
 
         if not parent_tasks and project_id:
-            # Project-wide fallback: all tasks in project
-            parent_tasks = list(Task.search(
+            # Project-wide fallback: ALL tasks in project
+            all_tasks = list(Task.search(
                 [('project_id', '=', project_id), ('active', 'in', [True, False])]
             ))
+            _logger.info(
+                '_find_subtasks_fuzzy: project-wide fallback, total tasks=%s',
+                len(all_tasks),
+            )
+            parent_tasks = all_tasks
 
-        # Pool subtasks
         subtasks = self.env['project.task'].browse()
         for parent in parent_tasks:
             children = parent.child_ids.filtered(
@@ -312,7 +314,6 @@ class DocProjectEnricher(models.AbstractModel):
         best_score = 0.0
         for subtask in subtasks:
             score = _similarity(subtask.name or '', name or '')
-            # Also try matching just the last part after the tag prefix
             m = _TAG_RE.match(subtask.name or '')
             if m:
                 clean_name = (subtask.name or '')[m.end():].strip()
@@ -320,6 +321,11 @@ class DocProjectEnricher(models.AbstractModel):
             if score > best_score:
                 best_score = score
                 best_task = subtask
+        if best_task:
+            _logger.info(
+                '_best_subtask_match: func/menu="%s" -> best task="%s" score=%.2f (threshold=%.2f) match=%s',
+                name, best_task.name, best_score, threshold, best_score >= threshold,
+            )
         return (best_task, best_score) if best_score >= threshold else (None, 0.0)
 
     def _parse_subtask_sections(self, plain_text):
