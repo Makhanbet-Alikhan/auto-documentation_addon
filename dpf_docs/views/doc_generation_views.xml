@@ -10,10 +10,14 @@
                     <button name="action_collect" type="object"
                             string="1. Collect Texts" class="btn-primary"
                             invisible="state not in ('draft',)"/>
+                    <button name="action_enrich_from_tasks" type="object"
+                            string="4. Enrich from Tasks"
+                            invisible="state in ('draft',)"
+                            help="Re-run project.task enrichment on all collected modules. Use this after adding task descriptions or changing the project."/>
                     <button name="action_capture_screenshots" type="object"
                             string="2. Capture Screenshots" class="btn-primary"
                             invisible="state not in ('awaiting_shots',)"
-                            help="Automatically screenshot every documented screen using a headless browser."/>
+                            help="Upload screenshots manually: open the module → Functions tab → open a function → Screenshot field."/>
                     <button name="action_render_all" type="object"
                             string="3. Render Markdown"
                             invisible="state not in ('awaiting_shots',)"/>
@@ -33,9 +37,13 @@
                                    options="{'no_create': True}"/>
                             <field name="module_names"
                                    placeholder="optional: e.g. sale, my_addon"/>
+                            <field name="project_id"
+                                   options="{'no_create': True}"
+                                   placeholder="Необязательно: ЦПФ Этап 2"/>
                         </group>
                         <group>
                             <field name="use_llm_caption"/>
+                            <field name="enrich_from_project"/>
                         </group>
                     </group>
                     <notebook>
@@ -54,18 +62,24 @@
                             <div class="alert alert-info" role="alert">
                                 <p><b>Step 1</b> — Collect Texts: introspects the ORM and
                                 parses Python docstrings/comments.</p>
-                                <p><b>Step 2</b> — Capture Screenshots: a headless browser
-                                runs <i>inside</i> Odoo, logs into the web client and
-                                screenshots every documented screen automatically. Each
-                                image is bound to its own screen, so it always appears
-                                directly under that screen's text in the manual.</p>
-                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download
-                                Word. Missing screenshots are also captured automatically
-                                right before each export.</p>
-                                <p class="text-muted">Requires the <code>playwright</code>
-                                Python package and Chromium in the Odoo container. You can
-                                always upload screenshots manually on each function as a
-                                fallback.</p>
+                                <p><b>Step 2</b> — Capture Screenshots: upload screenshots
+                                manually via Functions tab on each doc.module.</p>
+                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.</p>
+                                <p><b>Step 4</b> — Enrich from Tasks: re-reads project.task
+                                descriptions and fills in function/menu fields. Run this
+                                any time after editing tasks. Scoped to the selected
+                                <i>Project</i> if set; otherwise searches all projects.</p>
+                                <p><b>Task discovery order:</b></p>
+                                <ol>
+                                    <li>Tasks whose name starts with
+                                        <code>[module_technical_name]</code>
+                                        e.g. <code>[dpf_news] Описание</code></li>
+                                    <li>Tasks whose name contains the module name
+                                        anywhere (e.g. "Новостной портал", "dpf news")</li>
+                                    <li>If a Project is selected and nothing found —
+                                        all tasks from that project are used as a
+                                        fallback (matched by name similarity)</li>
+                                </ol>
                             </div>
                         </page>
                     </notebook>
@@ -82,6 +96,7 @@
             <list string="Documentation Runs">
                 <field name="name"/>
                 <field name="module_ids" widget="many2many_tags"/>
+                <field name="project_id"/>
                 <field name="state"/>
                 <field name="create_date"/>
             </list>

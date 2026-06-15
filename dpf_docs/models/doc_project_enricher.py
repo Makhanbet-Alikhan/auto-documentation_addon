@@ -1,34 +1,27 @@
 # -*- coding: utf-8 -*-
 """Project.task → doc enrichment service.
 
-Enriches ``doc.module``, ``doc.menu`` and ``doc.function`` records with
-human-written descriptions from Odoo ``project.task`` / sub-tasks.
+Task discovery uses THREE strategies (tried in order, scoped to project_id first
+if provided):
 
-Design principles
------------------
-* Best-effort only — silently skipped when project module absent / no task.
-* Copy, don’t reference — text is copied at enrichment time.
-* Never overwrite manual edits (overwrite=False by default).
-* Precedence: manual > task > generated-default.
+  Strategy A — Prefix match
+    Tasks whose name starts with "[module_technical_name]"
+    e.g. "[dpf_news] Описание"
 
-Task-name convention
---------------------
-Any task whose name starts with ``[module_technical_name]`` is a candidate.
-All such tasks are considered, and ALL their sub-tasks are pooled together
-before matching against menus / functions.  This lets a team split the
-description work across several parent tasks:
+  Strategy B — Fuzzy keyword match
+    Tasks whose name contains the module technical name or display name
+    anywhere (case-insensitive).
+    Useful when tasks are named like "Новостной портал" or "DPF News".
 
-    [dpf_news] Информационный блок (задача 1)
-        ├ [sub] All Posts — описание ...
-        └ [sub] Создание новости ...
+  Strategy C — Project-wide fallback
+    If project_id is given and strategies A+B found nothing, ALL tasks
+    from that project are treated as potential sources. Their subtasks
+    are pooled and matched against menus/functions by Jaccard similarity.
 
-    [dpf_news] Технические детали (задача 2)
-        └ [sub] Настройка ...
-
-Sub-task description format (optional section markers improve splitting):
+Sub-task description format (section markers improve field mapping):
 
     Описание:
-    Текст ...
+    ...
 
     Требования:
     - ...
@@ -53,7 +46,7 @@ _NOISE_RE = re.compile(
     flags=re.UNICODE,
 )
 _SECTION_RE = re.compile(
-    r'^\s*(?P<key>\u041eписание|Требования|Порядок|Результат)\s*:?\s*$',
+    r'^\s*(?P<key>Описание|Требования|Порядок|Результат)\s*:?\s*$',
     flags=re.UNICODE | re.IGNORECASE,
 )
 
@@ -84,14 +77,12 @@ class DocProjectEnricher(models.AbstractModel):
     # Public API
     # ------------------------------------------------------------------
 
-    def enrich_module(self, doc_module, overwrite=False):
-        """Обогатить doc_module данными из project.task.
+    def enrich_module(self, doc_module, overwrite=False, project_id=False):
+        """Enrich doc_module from project.task.
 
-        Три прохода:
-          1. doc.module.description  ← описание родительского таска
-          2. doc.menu.caption        ← лучший совпадающий сабтаск
-          3. doc.function fields     ← лучший совпадающий сабтаск
-        Сабтаски собираются со ВСЕХ родительских тасков с префиксом [module_name].
+        :param doc_module: doc.module record
+        :param overwrite: if True, overwrite existing non-empty fields
+        :param project_id: int id of project.project to scope the search
         """
         stats = {
             'module_enriched': False,
@@ -104,15 +95,19 @@ class DocProjectEnricher(models.AbstractModel):
             return stats
 
         technical_name = doc_module.technical_name
-        parent_tasks = self._find_all_parent_tasks(technical_name)
+        display_name = doc_module.name or ''
+
+        parent_tasks = self._find_all_parent_tasks(
+            technical_name, display_name, project_id=project_id
+        )
 
         if not parent_tasks:
             _logger.info(
-                'doc.project.enricher: no tasks found for module %s', technical_name
+                'doc.project.enricher: no tasks found for module %s (project_id=%s)',
+                technical_name, project_id,
             )
             return stats
 
-        # Use the first (best) task for the module-level description
         stats['module_enriched'] = self._enrich_module_description(
             doc_module, parent_tasks[0], overwrite=overwrite
         )
@@ -124,19 +119,22 @@ class DocProjectEnricher(models.AbstractModel):
                 lambda t: (t.description or '').strip() or (t.name or '').strip()
             )
 
+        # If parent tasks themselves have useful content but no children,
+        # treat the parents as subtasks too (e.g. flat task list)
+        if not subtasks:
+            subtasks = self.env['project.task'].browse(parent_tasks)
+
         _logger.info(
             'doc.project.enricher: module=%s parent_tasks=%s total_subtasks=%s',
             technical_name, len(parent_tasks), len(subtasks),
         )
 
-        # Pass 2 — menu captions
         for menu in doc_module.menu_ids:
             if self._enrich_menu_caption(menu, subtasks, overwrite=overwrite):
                 stats['menus_enriched'] += 1
             else:
                 stats['skipped'] += 1
 
-        # Pass 3 — function descriptions
         for func in doc_module.function_ids:
             if self._enrich_function(func, subtasks, overwrite=overwrite):
                 stats['functions_enriched'] += 1
@@ -159,34 +157,81 @@ class DocProjectEnricher(models.AbstractModel):
         return bool(module)
 
     # ------------------------------------------------------------------
-    # Task discovery — returns a LIST of all matching parent tasks
+    # Task discovery
     # ------------------------------------------------------------------
 
-    def _find_all_parent_tasks(self, technical_name):
-        """Найти ВСЕ project.task с префиксом [technical_name].
+    def _find_all_parent_tasks(self, technical_name, display_name='', project_id=False):
+        """Find all project.task relevant to the module.
 
-        Возвращает список, отсортированный по убыванию сабтасков (больше → раньше),
-        затем активные перед архивированными.
+        Three strategies tried in order until at least one task is found:
+
+        A) Prefix match: name starts with [technical_name]
+        B) Fuzzy keyword match: name contains technical_name or display_name
+        C) Project-wide fallback (only if project_id given): ALL tasks in the
+           project (their subtasks will be matched by Jaccard in Pass 2/3)
         """
         try:
             Task = self.env['project.task'].sudo()
         except KeyError:
             return []
 
-        all_tasks = Task.search([
-            ('name', 'like', '[%s]' % technical_name),
-            ('active', 'in', [True, False]),
-        ])
+        base_domain = [('active', 'in', [True, False])]
+        if project_id:
+            base_domain.append(('project_id', '=', project_id))
 
-        candidates = [
+        # Strategy A: classic [module_name] prefix
+        all_tasks = Task.search([
+            ('name', 'ilike', '[%s]' % technical_name),
+        ] + base_domain)
+        candidates_a = [
             t for t in all_tasks
             if (lambda m: m and m.group(1).lower() == technical_name.lower())(
                 _TAG_RE.match(t.name or '')
             )
         ]
+        if candidates_a:
+            candidates_a.sort(key=lambda t: (-len(t.child_ids), 0 if t.active else 1))
+            _logger.info(
+                '_find_all_parent_tasks [A]: module=%s found=%s',
+                technical_name, len(candidates_a),
+            )
+            return candidates_a
 
-        candidates.sort(key=lambda t: (-len(t.child_ids), 0 if t.active else 1))
-        return candidates
+        # Strategy B: fuzzy keyword — technical name or display name anywhere
+        keywords = [k for k in [technical_name.replace('_', ' '), display_name] if k]
+        candidates_b = []
+        for kw in keywords:
+            found = Task.search([
+                ('name', 'ilike', kw),
+            ] + base_domain)
+            for t in found:
+                if t not in candidates_b:
+                    candidates_b.append(t)
+        if candidates_b:
+            candidates_b.sort(key=lambda t: (-len(t.child_ids), 0 if t.active else 1))
+            _logger.info(
+                '_find_all_parent_tasks [B]: module=%s found=%s (keywords=%s)',
+                technical_name, len(candidates_b), keywords,
+            )
+            return candidates_b
+
+        # Strategy C: project-wide fallback
+        if project_id:
+            all_project_tasks = Task.search([
+                ('project_id', '=', project_id),
+                ('active', 'in', [True, False]),
+            ])
+            if all_project_tasks:
+                _logger.info(
+                    '_find_all_parent_tasks [C]: module=%s using all %s tasks from project %s',
+                    technical_name, len(all_project_tasks), project_id,
+                )
+                return list(all_project_tasks)
+
+        _logger.info(
+            '_find_all_parent_tasks: module=%s — no tasks found', technical_name
+        )
+        return []
 
     # ------------------------------------------------------------------
     # Text utilities
@@ -206,7 +251,6 @@ class DocProjectEnricher(models.AbstractModel):
         return text.strip()
 
     def _best_subtask_match(self, name, subtasks, threshold=0.30):
-        """Return (best_task, score) or (None, 0.0) if below threshold."""
         best_task = None
         best_score = 0.0
         for subtask in subtasks:
@@ -220,7 +264,6 @@ class DocProjectEnricher(models.AbstractModel):
         return (best_task, best_score) if best_score >= threshold else (None, 0.0)
 
     def _parse_subtask_sections(self, plain_text):
-        """Разбить текст на секции по маркерам (Описание / Требования / Порядок / Результат)."""
         result = {'description': '', 'requirements': '', 'steps': '', 'result': ''}
         if not plain_text:
             return result
@@ -241,7 +284,6 @@ class DocProjectEnricher(models.AbstractModel):
                 buckets[current_key].append(line)
         for k, bucket in buckets.items():
             result[k] = '\n'.join(bucket).strip()
-        # If no section markers, all text goes to description
         if not any([result['requirements'], result['steps'], result['result']]):
             result['description'] = plain_text.strip()
         return result
@@ -304,7 +346,6 @@ class DocProjectEnricher(models.AbstractModel):
         return True
 
     def _enrich_function(self, func, subtasks, overwrite=False, threshold=0.30):
-        """Обогатить doc.function из лучшего сабтаска (fuzzy Jaccard ≥ 0.30)."""
         best_task, _score = self._best_subtask_match(
             func.name or '', subtasks, threshold=threshold
         )

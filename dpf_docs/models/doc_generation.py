@@ -1,19 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Generation orchestrator.
-
-A ``doc.generation`` record is one run: the user picks one or more installed
-modules, presses *Generate*, and this model coordinates the whole pipeline:
-
-1. Introspect the ORM (menus, actions, fields)         -> doc.introspector
-2. Parse the source code (docstrings, comments)         -> doc.source.parser
-3. Compose texts (deterministic, optional LLM)          -> services.text_composer
-4. Persist doc.module / doc.menu / doc.model.info
-5. Apply manual defaults (fills empty fields)
-6. Build doc.function from menus
-7. Enrich from project.task (best-effort)               -> doc.project.enricher
-   NOTE: enrichment runs AFTER build_functions_from_menus so that
-   doc.function records already exist when Pass 3 runs.
-"""
+"""Generation orchestrator."""
 import base64
 import logging
 
@@ -42,12 +28,19 @@ class DocGeneration(models.Model):
         "ir.module.module",
         string="Установленные модули",
         domain="[('state', '=', 'installed')]",
-        help="Выберите один или несколько установленных модулей для документирования.",
     )
     module_names = fields.Char(
         string="Дополнительные модули",
-        help="Необязательно. Технические названия через запятую, "
-             "например: 'sale,my_addon'.",
+        help="Необязательно. Технические названия через запятую.",
+    )
+    project_id = fields.Many2one(
+        'project.project',
+        string='Проект для обогащения',
+        help=(
+            'Укажите Odoo-проект, в котором хранятся задачи с описаниями модулей. '
+            'Если указан — поиск ведётся в первую очередь внутри него. '
+            'Если задачи с префиксом [module_name] не найдены — берутся все сабтаски проекта.'
+        ),
     )
     state = fields.Selection(
         [
@@ -63,9 +56,7 @@ class DocGeneration(models.Model):
     doc_module_ids = fields.One2many(
         "doc.module", "generation_id", string="Задокументированные модули"
     )
-    use_llm_caption = fields.Boolean(
-        string="Использовать LLM-подписи",
-    )
+    use_llm_caption = fields.Boolean(string="Использовать LLM-подписи")
     enrich_from_project = fields.Boolean(
         string="Обогатить из Project Tasks",
         default=True,
@@ -76,14 +67,8 @@ class DocGeneration(models.Model):
     # ------------------------------------------------------------------
     @api.onchange('module_ids')
     def _onchange_module_ids(self):
-        """Auto-fill 'name' from the first selected module's display name.
-
-        Only fires when the current name is still the default placeholder
-        or empty, so manual edits are never overwritten.
-        """
         default_name = _("Новый запуск")
         current_name = (self.name or '').strip()
-        # Don't overwrite if the user already typed a custom name
         if current_name and current_name != default_name:
             return
         if not self.module_ids:
@@ -105,11 +90,10 @@ class DocGeneration(models.Model):
         return names
 
     def action_collect(self):
-        """Собрать данные о модуле: меню, поля, описания."""
         self.ensure_one()
         modules = self._resolve_module_names()
         if not modules:
-            raise UserError_("Выберите хотя бы один модуль для документирования.")
+            raise UserError(_("Выберите хотя бы один модуль для документирования."))
 
         introspector = self.env["doc.introspector"]
         parser = self.env["doc.source.parser"]
@@ -129,10 +113,9 @@ class DocGeneration(models.Model):
         2. Parse source
         3. Compose initial texts
         4. Persist doc.module / doc.menu / doc.model.info
-        5. Apply manual defaults (fills still-empty fields)
-        6. Build doc.function from menus          <-- functions created here
-        7. Enrich from project.task               <-- enricher runs AFTER
-           so that doc.function records exist when Pass 3 executes
+        5. Apply manual defaults
+        6. Build doc.function from menus
+        7. Enrich from project.task (AFTER functions are created)
         """
         ir_module = self.env["ir.module.module"].search(
             [("name", "=", module_name)], limit=1
@@ -159,28 +142,75 @@ class DocGeneration(models.Model):
         self._build_menus(doc_module, module_name, introspector)
         self._build_models(doc_module, module_name, introspector, parser, parsed)
 
-        # Step 5: apply defaults to fill still-empty metadata fields
         doc_module.apply_manual_defaults()
-
-        # Step 6: build functions from menus (MUST happen before enrichment)
         doc_module.build_functions_from_menus()
 
-        # Step 7: enrich from project.task — runs AFTER functions are created
         if self.enrich_from_project:
-            try:
-                enricher = self.env['doc.project.enricher']
-                stats = enricher.enrich_module(doc_module, overwrite=False)
-                _logger.info(
-                    '_collect_one_module: project enrichment for %s — %s',
-                    module_name, stats
-                )
-            except Exception:  # noqa: BLE001
-                _logger.warning(
-                    '_collect_one_module: project enrichment failed for %s (non-fatal)',
-                    module_name, exc_info=True
-                )
+            self._run_enrichment(doc_module, overwrite=False)
 
         return doc_module
+
+    def _run_enrichment(self, doc_module, overwrite=False):
+        """Run project.task enrichment for a single doc.module. Non-fatal."""
+        try:
+            enricher = self.env['doc.project.enricher']
+            stats = enricher.enrich_module(
+                doc_module,
+                overwrite=overwrite,
+                project_id=self.project_id.id if self.project_id else False,
+            )
+            _logger.info(
+                '_run_enrichment: module=%s stats=%s',
+                doc_module.technical_name, stats,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                '_run_enrichment: failed for %s (non-fatal)',
+                doc_module.technical_name, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # NEW: manual re-enrichment button
+    # ------------------------------------------------------------------
+    def action_enrich_from_tasks(self):
+        """Re-run project.task enrichment on all doc.module records.
+
+        Visible after Collect Texts (state != draft).
+        Does NOT re-collect menus/models, only overwrites empty task-fields.
+        Pass overwrite=True so that previously generated defaults get
+        replaced by real task content.
+        """
+        self.ensure_one()
+        if not self.doc_module_ids:
+            raise UserError(_("Сначала выполните «1. Собрать тексты»."))
+        total = {'menus_enriched': 0, 'functions_enriched': 0}
+        for doc_module in self.doc_module_ids:
+            try:
+                enricher = self.env['doc.project.enricher']
+                stats = enricher.enrich_module(
+                    doc_module,
+                    overwrite=True,
+                    project_id=self.project_id.id if self.project_id else False,
+                )
+                total['menus_enriched'] += stats.get('menus_enriched', 0)
+                total['functions_enriched'] += stats.get('functions_enriched', 0)
+            except Exception:  # noqa: BLE001
+                _logger.warning(
+                    'action_enrich_from_tasks: failed for %s',
+                    doc_module.technical_name, exc_info=True,
+                )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Обогащение завершено'),
+                'message': _(
+                    'Меню: %s, Функции: %s записей из project.task.'
+                ) % (total['menus_enriched'], total['functions_enriched']),
+                'type': 'success',
+                'sticky': False,
+            },
+        }
 
     def _build_menus(self, doc_module, module_name, introspector):
         nodes = introspector.get_menu_tree(module_name)
@@ -374,15 +404,13 @@ class DocGeneration(models.Model):
         return True
 
     def action_capture_screenshots(self):
-        """Notification about manual screenshot upload. sticky=False so it
-        auto-dismisses after ~5 seconds."""
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
                 "title": _("Скриншоты"),
                 "message": _(
-                    "Автоматический захват отключён. Загрузите скриншоты вручную: "
+                    "Загрузите скриншоты вручную: "
                     "откройте модуль → вкладка «Функции» → откройте функцию → поле «Скриншот»."
                 ),
                 "type": "info",
@@ -401,7 +429,7 @@ class DocGeneration(models.Model):
     def action_download_word(self):
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError_("Нечего экспортировать. Сначала выполните сбор текстов.")
+            raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)
