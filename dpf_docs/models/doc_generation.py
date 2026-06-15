@@ -150,7 +150,7 @@ class DocGeneration(models.Model):
         doc_module = self.env["doc.module"].create({
             "name": ir_module.shortdesc or module_name,
             "generation_id": self.id,
-            "technical_name": module_name,   # always the TECHNICAL name e.g. dpf_events
+            "technical_name": module_name,
             "description": module_doc,
         })
 
@@ -250,6 +250,8 @@ class DocGeneration(models.Model):
             caption = text_composer.compose_menu_caption(
                 node["name"], res_model, node.get("view_modes"), fields_meta
             )
+            # Build key_fields string from required + important fields
+            key_fields = self._build_key_fields(fields_meta)
             self.env["doc.menu"].create({
                 "doc_module_id": doc_module.id,
                 "menu_xmlid": node.get("complete_name"),
@@ -264,7 +266,60 @@ class DocGeneration(models.Model):
                 "caption": caption,
                 "caption_source": 'generated',
                 "capture_state": "skipped",
+                "key_fields": key_fields or False,
             })
+
+    @staticmethod
+    def _build_key_fields(fields_meta):
+        """Build a newline-separated key_fields string from fields_meta dict.
+
+        Picks required fields first, then fields with a 'help' string,
+        limited to the 10 most relevant. Each line is formatted as:
+          «Field Label» — help text (or just «Field Label» when no help).
+
+        fields_meta is a dict: {field_name: {label, type, required, help, ...}}
+        """
+        if not fields_meta:
+            return ""
+
+        # Skip purely technical / audit fields
+        SKIP_FIELDS = {
+            'id', 'create_uid', 'create_date', 'write_uid', 'write_date',
+            '__last_update', 'display_name', 'active',
+        }
+
+        lines = []
+        # 1st pass — required fields
+        for fname, fmeta in fields_meta.items():
+            if fname in SKIP_FIELDS:
+                continue
+            if not fmeta.get('required'):
+                continue
+            label = fmeta.get('label') or fmeta.get('string') or fname
+            help_text = (fmeta.get('help') or '').strip()
+            if help_text:
+                lines.append('«%s» — %s' % (label, help_text))
+            else:
+                lines.append('«%s»' % label)
+            if len(lines) >= 10:
+                break
+
+        # 2nd pass — non-required fields that have a help string
+        if len(lines) < 10:
+            for fname, fmeta in fields_meta.items():
+                if fname in SKIP_FIELDS:
+                    continue
+                if fmeta.get('required'):
+                    continue  # already added above
+                help_text = (fmeta.get('help') or '').strip()
+                if not help_text:
+                    continue
+                label = fmeta.get('label') or fmeta.get('string') or fname
+                lines.append('«%s» — %s' % (label, help_text))
+                if len(lines) >= 10:
+                    break
+
+        return '\n'.join(lines)
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
         for minfo in introspector.get_module_models(module_name):

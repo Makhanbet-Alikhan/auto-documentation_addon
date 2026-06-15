@@ -44,6 +44,17 @@ class DocMenu(models.Model):
         help="Stable client URL the worker navigates to, e.g. /odoo/action-42.",
     )
 
+    # --- Key fields for function step generation --------------------------
+    key_fields = fields.Text(
+        string="Key Fields",
+        help=(
+            "Comma or newline-separated list of important fields on this screen.\n"
+            "Format: 'Field Label — Description' or just 'Field Label'.\n"
+            "Auto-populated from required/key model fields during collection.\n"
+            "Used by function_for_create() to generate per-field step instructions."
+        ),
+    )
+
     # --- Generated documentation ------------------------------------------
     caption = fields.Text(
         string="Screen Description",
