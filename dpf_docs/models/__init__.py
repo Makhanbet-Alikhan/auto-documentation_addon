@@ -9,5 +9,6 @@ from . import doc_screenshot_capturer
 from . import doc_model_info
 from . import doc_menu
 from . import doc_function
+from . import doc_project_enricher
 from . import doc_module
 from . import doc_generation

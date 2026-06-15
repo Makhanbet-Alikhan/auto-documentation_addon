@@ -8,7 +8,8 @@ modules, presses *Generate*, and this model coordinates the whole pipeline:
 2. parse the source code (docstrings, comments)         -> doc.source.parser
 3. compose texts (deterministic, optional LLM)          -> services.text_composer
 4. persist doc.module / doc.menu / doc.model.info
-5. render Markdown / PDF / Word                         -> _render_markdown / report
+5. [NEW] enrich from project.task (best-effort)         -> doc.project.enricher
+6. render Markdown / PDF / Word                         -> _render_markdown / report
 
 Screenshots are NOT captured automatically. Placeholder text is inserted
 instead so that a human can later paste real images from an external tool.
@@ -67,6 +68,16 @@ class DocGeneration(models.Model):
         string="Использовать LLM-подписи",
         help="Если включено, внешний воркер может подписывать скриншоты через Vision LLM.",
     )
+    enrich_from_project = fields.Boolean(
+        string="Обогатить из Project Tasks",
+        default=True,
+        help=(
+            "Если включено, автодокументатор попытается найти задачи проекта "
+            "с тегом [module_name] и импортировать их описания в документацию. "
+            "Работает только если модуль Project установлен. "
+            "Не перезаписывает вручную заполненные поля."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Step 1-4: collect texts + structure
@@ -97,7 +108,17 @@ class DocGeneration(models.Model):
         return True
 
     def _collect_one_module(self, module_name, introspector, parser):
-        """Build a single doc.module with its menus and models."""
+        """Build a single doc.module with its menus and models.
+
+        Pipeline:
+        1. Introspect ORM — menus, fields, views
+        2. Parse source — docstrings, field comments
+        3. Compose initial texts
+        4. Persist doc.module / doc.menu / doc.model.info
+        5. [NEW] Enrich from project.task (best-effort, non-destructive)
+        6. Apply manual defaults (fills still-empty fields)
+        7. Build doc.function from menus
+        """
         ir_module = self.env["ir.module.module"].search(
             [("name", "=", module_name)], limit=1
         )
@@ -122,6 +143,22 @@ class DocGeneration(models.Model):
 
         self._build_menus(doc_module, module_name, introspector)
         self._build_models(doc_module, module_name, introspector, parser, parsed)
+
+        # Step 5: enrich from project.task (best-effort)
+        if self.enrich_from_project:
+            try:
+                enricher = self.env['doc.project.enricher']
+                stats = enricher.enrich_module(doc_module, overwrite=False)
+                _logger.info(
+                    '_collect_one_module: project enrichment for %s — %s',
+                    module_name, stats
+                )
+            except Exception:  # noqa: BLE001
+                _logger.warning(
+                    '_collect_one_module: project enrichment failed for %s (non-fatal)',
+                    module_name, exc_info=True
+                )
+
         doc_module.apply_manual_defaults()
         doc_module.build_functions_from_menus()
         return doc_module
@@ -148,6 +185,7 @@ class DocGeneration(models.Model):
                 "view_modes": ",".join(node.get("view_modes") or []),
                 "web_url": node.get("web_url") or False,
                 "caption": caption,
+                "caption_source": 'generated',
                 # Never auto-capture: screenshots are inserted manually.
                 "capture_state": "skipped",
             })
@@ -370,7 +408,7 @@ class DocGeneration(models.Model):
         """Сгенерировать Word-документ для всех задокументированных модулей."""
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError_("Нечего экспортировать. Сначала выполните сбор текстов."))
+            raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)

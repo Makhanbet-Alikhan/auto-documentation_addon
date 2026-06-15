@@ -50,6 +50,20 @@ class DocModule(models.Model):
     bibliography = fields.Text(string="4 Bibliography")
     glossary = fields.Text(string="5 Glossary")
 
+    # --- Project enrichment traceability ----------------------------------
+    project_context_source = fields.Char(
+        string="Project Task (source)",
+        help="Name of the project.task used as context source for this module description.",
+    )
+    project_context_note = fields.Text(
+        string="Enrichment Note",
+        help="Auto-generated note about where the module description was imported from.",
+    )
+    project_task_name_snapshot = fields.Char(
+        string="Task Name Snapshot",
+        help="Snapshot of the task name at import time (survives task deletion).",
+    )
+
     menu_ids = fields.One2many("doc.menu", "doc_module_id", string="Menus")
     model_ids = fields.One2many("doc.model.info", "doc_module_id", string="Models")
     function_ids = fields.One2many(
@@ -101,6 +115,40 @@ class DocModule(models.Model):
         if values:
             self.write(values)
         return True
+
+    # ------------------------------------------------------------------
+    # Project task enrichment
+    # ------------------------------------------------------------------
+    def action_enrich_from_project(self):
+        """Button: enrich descriptions from project.task (non-destructive).
+
+        Finds the matching project.task by [module_name] prefix, copies the
+        task description into doc.module.description (if empty), and maps
+        sub-task descriptions to matching doc.menu captions.
+
+        Existing manually-set values are never overwritten.
+        """
+        self.ensure_one()
+        enricher = self.env['doc.project.enricher']
+        stats = enricher.enrich_module(self, overwrite=False)
+        msg = _(
+            'Обогащение завершено: описание модуля %(module)s, '
+            'меню обогащено %(menus)s, пропущено %(skipped)s.'
+        ) % {
+            'module': _('обновлено') if stats.get('module_enriched') else _('не изменено'),
+            'menus': stats.get('menus_enriched', 0),
+            'skipped': stats.get('skipped', 0),
+        }
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Обогащение из Project'),
+                'message': msg,
+                'type': 'success',
+                'sticky': False,
+            },
+        }
 
     # ------------------------------------------------------------------
     # Helper: does this menu have a form view?
