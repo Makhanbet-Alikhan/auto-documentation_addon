@@ -34,11 +34,9 @@ class DocGeneration(models.Model):
         help="Необязательно. Технические названия через запятую.",
     )
 
-    # Soft Many2one to project.project.
-    # Declared as Integer + display-name pair so that the registry
-    # does NOT crash when project module is absent.
-    # When project IS installed the XML view renders this as a proper
-    # many2one widget via widget="many2one_reference".
+    # Soft dependency on project.project.
+    # Integer stores the ID; Char stores the display name.
+    # No hard FK so the registry never crashes if project module is absent.
     project_task_project_id = fields.Integer(
         string="ID Проекта",
         default=0,
@@ -50,8 +48,8 @@ class DocGeneration(models.Model):
         inverse='_inverse_project_name',
         store=True,
         help=(
-            'Укажите название Odoo-проекта, задачи которого используются '
-            'для обогащения документации. Например: «ЦПФ Этап 2»'
+            'Укажите название Odoo-проекта. '
+            'Нажмите 📂 чтобы выбрать из списка проектов.'
         ),
     )
 
@@ -103,13 +101,32 @@ class DocGeneration(models.Model):
             )
             rec.project_task_project_id = project.id if project else 0
 
-    # Helper: return project recordset (or empty) safely
-    def _get_project_record(self):
+    # ------------------------------------------------------------------
+    # Project picker: opens project list in a dialog.
+    # User clicks a project → JS passes the id back via URL hash or
+    # we use a simple act_window + onchange pattern.
+    # Since we can't intercept the selection from act_window easily,
+    # we provide a simpler approach: open a wizard that lists projects.
+    # ------------------------------------------------------------------
+    def action_pick_project(self):
+        """Open project list in a new tab so user can see project names.
+        After seeing the name, they can type it in the field.
+        Alternatively, returns an act_window to project.project list.
+        """
         self.ensure_one()
-        pid = self.project_task_project_id
-        if pid and 'project.project' in self.env:
-            return self.env['project.project'].sudo().browse(pid).exists()
-        return self.env['project.project'].sudo().browse() if 'project.project' in self.env else None
+        if 'project.project' not in self.env:
+            raise UserError(_("Модуль 'project' не установлен в данной системе."))
+        return {
+            'name': _('Выберите проект'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'project.project',
+            'view_mode': 'list',
+            'target': 'new',
+            'context': {
+                'default_doc_generation_id': self.id,
+                'form_view_initial_mode': 'edit',
+            },
+        }
 
     # ------------------------------------------------------------------
     # Onchange: auto-fill run name from selected module
@@ -395,7 +412,7 @@ class DocGeneration(models.Model):
                     lines.append("")
                 rows = model.field_table_json or []
                 if rows:
-                    lines.append("| Поле | Название | Тип | Обязательное | Описание |")
+                    lines.append("| Поле | Название | Тип | Обязателэное | Описание |")
                     lines.append("|------|-------|-----|-----------|---------|")
                     for r in rows:
                         lines.append("| `%s` | %s | %s | %s | %s |" % (

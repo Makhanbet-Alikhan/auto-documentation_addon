@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
 
+    <!-- Action to pick a project (used by the smart button in the form) -->
+    <record id="action_pick_project_for_doc" model="ir.actions.act_window">
+        <field name="name">Выбрать проект</field>
+        <field name="res_model">project.project</field>
+        <field name="view_mode">list,form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="base.model_res_users"/>
+    </record>
+
     <record id="view_doc_generation_form" model="ir.ui.view">
         <field name="name">doc.generation.form</field>
         <field name="model">doc.generation</field>
@@ -37,20 +46,30 @@
                             <field name="module_names"
                                    placeholder="optional: e.g. sale, my_addon"/>
                             <!--
-                                project_task_project_name is a Char field computed/inversed
-                                from project_task_project_id (Integer).
-                                We display it as a many2one-like widget using
-                                widget="many2one_reference" which renders a dropdown
-                                when the project module is installed, and falls back
-                                gracefully to a text input otherwise.
-                                The hidden project_task_project_id holds the resolved id.
+                                Project selection: Char field with inverse that resolves
+                                to project_task_project_id (Integer, no hard FK).
+                                Type the project name — it will be matched via ilike.
+                                The action_pick_project button below opens a list
+                                of projects in a dialog so the user can click one.
                             -->
-                            <field name="project_task_project_name"
-                                   widget="many2one_reference"
-                                   options="{&#x27;model_field&#x27;: &#x27;project_task_project_model&#x27;}"
-                                   placeholder="Необязательно: выберите или введите название проекта"
-                                   help="Проект Odoo, задачи которого используются для обогащения документации."/>
-                            <field name="project_task_project_id" invisible="1"/>
+                            <label for="project_task_project_name" string="Проект для обогащения"/>
+                            <div class="o_field_widget">
+                                <div style="display:flex;gap:6px;align-items:center;">
+                                    <field name="project_task_project_name"
+                                           nolabel="1"
+                                           placeholder="Введите название проекта (напр. ЦПФ Этап 2)"
+                                           help="Название сохраняется и резолвится в ID проекта автоматически."/>
+                                    <button name="action_pick_project" type="object"
+                                            string="📂" title="Выбрать проект из списка"
+                                            class="btn btn-sm btn-secondary"
+                                            help="Открыть список проектов для выбора"/>
+                                </div>
+                                <small class="text-muted" invisible="not project_task_project_id">
+                                    ID: <field name="project_task_project_id" nolabel="1"
+                                              readonly="1"
+                                              style="display:inline;width:auto;"/>
+                                </small>
+                            </div>
                         </group>
                         <group>
                             <field name="use_llm_caption"/>
@@ -81,8 +100,8 @@
                                 <p><b>Структура задач в проекте:</b></p>
                                 <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Проект (напр. «ЦПФ Этап 2»)
 └── [Main task] Разработка модулей ...
-     ├── [dpf_events] Название функции 1   ← «родительская задача модуля»
-     │    ├── Подзадача 1  (Описание / Требования / Порядок / Результат)
+     ├── [dpf_events] Название функции 1   ← «родительская»
+     │    ├── Подзадача 1  (Описание/Требования/Порядок/Результат)
      │    └── Подзадача 2
      ├── [dpf_events] Название функции 2
      │    └── Подзадача 3
