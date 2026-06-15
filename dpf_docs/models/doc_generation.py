@@ -33,9 +33,12 @@ class DocGeneration(models.Model):
         string="Дополнительные модули",
         help="Необязательно. Технические названия через запятую.",
     )
-    # Soft dependency on project: stored as Integer + display name.
-    # This avoids a hard comodel reference to project.project which would
-    # crash if the project module is not installed.
+
+    # Soft Many2one to project.project.
+    # Declared as Integer + display-name pair so that the registry
+    # does NOT crash when project module is absent.
+    # When project IS installed the XML view renders this as a proper
+    # many2one widget via widget="many2one_reference".
     project_task_project_id = fields.Integer(
         string="ID Проекта",
         default=0,
@@ -47,10 +50,11 @@ class DocGeneration(models.Model):
         inverse='_inverse_project_name',
         store=True,
         help=(
-            'Укажите название Odoo-проекта, в котором хранятся задачи '
-            'с описаниями модулей. Например: «ЦПФ Этап 2»'
+            'Укажите название Odoo-проекта, задачи которого используются '
+            'для обогащения документации. Например: «ЦПФ Этап 2»'
         ),
     )
+
     state = fields.Selection(
         [
             ("draft", "Черновик"),
@@ -76,9 +80,10 @@ class DocGeneration(models.Model):
     # ------------------------------------------------------------------
     @api.depends('project_task_project_id')
     def _compute_project_name(self):
+        has_project = 'project.project' in self.env
         for rec in self:
             pid = rec.project_task_project_id
-            if pid and 'project.project' in self.env:
+            if pid and has_project:
                 project = self.env['project.project'].sudo().browse(pid).exists()
                 rec.project_task_project_name = project.name if project else False
             else:
@@ -97,6 +102,14 @@ class DocGeneration(models.Model):
                 [('name', 'ilike', name)], limit=1
             )
             rec.project_task_project_id = project.id if project else 0
+
+    # Helper: return project recordset (or empty) safely
+    def _get_project_record(self):
+        self.ensure_one()
+        pid = self.project_task_project_id
+        if pid and 'project.project' in self.env:
+            return self.env['project.project'].sudo().browse(pid).exists()
+        return self.env['project.project'].sudo().browse() if 'project.project' in self.env else None
 
     # ------------------------------------------------------------------
     # Onchange: auto-fill run name from selected module

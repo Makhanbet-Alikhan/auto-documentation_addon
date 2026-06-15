@@ -36,9 +36,21 @@
                                    options="{'no_create': True}"/>
                             <field name="module_names"
                                    placeholder="optional: e.g. sale, my_addon"/>
+                            <!--
+                                project_task_project_name is a Char field computed/inversed
+                                from project_task_project_id (Integer).
+                                We display it as a many2one-like widget using
+                                widget="many2one_reference" which renders a dropdown
+                                when the project module is installed, and falls back
+                                gracefully to a text input otherwise.
+                                The hidden project_task_project_id holds the resolved id.
+                            -->
                             <field name="project_task_project_name"
-                                   placeholder="Необязательно: ЦПФ Этап 2"
-                                   help="Название проекта Odoo (не обязательно). Используется для поиска задач при обогащении."/>
+                                   widget="many2one_reference"
+                                   options="{&#x27;model_field&#x27;: &#x27;project_task_project_model&#x27;}"
+                                   placeholder="Необязательно: выберите или введите название проекта"
+                                   help="Проект Odoo, задачи которого используются для обогащения документации."/>
+                            <field name="project_task_project_id" invisible="1"/>
                         </group>
                         <group>
                             <field name="use_llm_caption"/>
@@ -59,24 +71,40 @@
                         </page>
                         <page string="How it works">
                             <div class="alert alert-info" role="alert">
-                                <p><b>Step 1</b> — Collect Texts.</p>
-                                <p><b>Step 2</b> — Capture Screenshots (upload manually).</p>
-                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.</p>
-                                <p><b>Step 4 — Enrich from Tasks</b>: re-reads project.task
-                                descriptions and fills function/menu fields. Run any time
-                                after editing tasks.</p>
-                                <p><b>Task discovery order (per module):</b></p>
-                                <ol>
-                                    <li>Tasks starting with <code>[module_name]</code>
-                                        e.g. <code>[dpf_news] Описание</code></li>
-                                    <li>Tasks containing the module name anywhere</li>
-                                    <li>If <i>Project</i> is set and nothing found —
-                                        all tasks from that project (matched by similarity)</li>
-                                </ol>
-                                <p>Sub-task sections: <code>Описание:</code>
-                                <code>Требования:</code>
-                                <code>Порядок:</code>
-                                <code>Результат:</code></p>
+                                <p><b>Шаг 1</b> — Collect Texts: сбор меню, моделей и функций.</p>
+                                <p><b>Шаг 2</b> — Capture Screenshots: загрузите скриншоты вручную.</p>
+                                <p><b>Шаг 3</b> — Render Markdown / Print PDF / Download Word.</p>
+                                <p><b>Шаг 4 — Enrich from Tasks</b>: повторно читает задачи проекта
+                                и заполняет поля функций/меню. Запускайте в любое время после
+                                редактирования задач.</p>
+                                <hr/>
+                                <p><b>Структура задач в проекте:</b></p>
+                                <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Проект (напр. «ЦПФ Этап 2»)
+└── [Main task] Разработка модулей ...
+     ├── [dpf_events] Название функции 1   ← «родительская задача модуля»
+     │    ├── Подзадача 1  (Описание / Требования / Порядок / Результат)
+     │    └── Подзадача 2
+     ├── [dpf_events] Название функции 2
+     │    └── Подзадача 3
+     └── [dpf_news] ...
+          └── ...</pre>
+                                <p>Система ищет задачи, название которых начинается с
+                                <code>[имя_модуля]</code>, например <code>[dpf_events]</code>.
+                                Затем берёт их подзадачи и сопоставляет с функциями
+                                документации по схожести названий (Jaccard ≥ 0.30).</p>
+                                <p><b>Разделы в описании подзадачи:</b></p>
+                                <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Описание:
+...
+
+Требования:
+- ...
+
+Порядок:
+1. ...
+
+Результат:
+...</pre>
+                                <p>Если разделов нет — всё описание попадает в поле «Описание» функции.</p>
                             </div>
                         </page>
                     </notebook>
