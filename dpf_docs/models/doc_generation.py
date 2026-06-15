@@ -34,9 +34,7 @@ class DocGeneration(models.Model):
         help="Необязательно. Технические названия через запятую.",
     )
 
-    # Soft dependency on project.project.
-    # Integer stores the ID; Char stores the display name.
-    # No hard FK so the registry never crashes if project module is absent.
+    # Soft dependency on project.project — no hard FK.
     project_task_project_id = fields.Integer(
         string="ID Проекта",
         default=0,
@@ -44,12 +42,8 @@ class DocGeneration(models.Model):
     )
     project_task_project_name = fields.Char(
         string="Проект для обогащения",
-        compute='_compute_project_name',
-        inverse='_inverse_project_name',
-        store=True,
         help=(
-            'Укажите название Odoo-проекта. '
-            'Нажмите 📂 чтобы выбрать из списка проектов.'
+            'Укажите название Odoo-проекта или нажмите 📂 для выбора.'
         ),
     )
 
@@ -74,58 +68,25 @@ class DocGeneration(models.Model):
     )
 
     # ------------------------------------------------------------------
-    # Compute / inverse for project name display
-    # ------------------------------------------------------------------
-    @api.depends('project_task_project_id')
-    def _compute_project_name(self):
-        has_project = 'project.project' in self.env
-        for rec in self:
-            pid = rec.project_task_project_id
-            if pid and has_project:
-                project = self.env['project.project'].sudo().browse(pid).exists()
-                rec.project_task_project_name = project.name if project else False
-            else:
-                rec.project_task_project_name = False
-
-    def _inverse_project_name(self):
-        """Resolve typed project name to project.project id (soft)."""
-        if 'project.project' not in self.env:
-            return
-        for rec in self:
-            name = (rec.project_task_project_name or '').strip()
-            if not name:
-                rec.project_task_project_id = 0
-                continue
-            project = self.env['project.project'].sudo().search(
-                [('name', 'ilike', name)], limit=1
-            )
-            rec.project_task_project_id = project.id if project else 0
-
-    # ------------------------------------------------------------------
-    # Project picker: opens project list in a dialog.
-    # User clicks a project → JS passes the id back via URL hash or
-    # we use a simple act_window + onchange pattern.
-    # Since we can't intercept the selection from act_window easily,
-    # we provide a simpler approach: open a wizard that lists projects.
+    # Project picker wizard button
     # ------------------------------------------------------------------
     def action_pick_project(self):
-        """Open project list in a new tab so user can see project names.
-        After seeing the name, they can type it in the field.
-        Alternatively, returns an act_window to project.project list.
-        """
+        """Open the project picker wizard (target=new dialog)."""
         self.ensure_one()
         if 'project.project' not in self.env:
             raise UserError(_("Модуль 'project' не установлен в данной системе."))
+        wizard = self.env['doc.project.picker.wizard'].create({
+            'generation_id': self.id,
+            'project_id_int': self.project_task_project_id or 0,
+            'project_name': self.project_task_project_name or '',
+        })
         return {
             'name': _('Выберите проект'),
             'type': 'ir.actions.act_window',
-            'res_model': 'project.project',
-            'view_mode': 'list',
+            'res_model': 'doc.project.picker.wizard',
+            'res_id': wizard.id,
+            'view_mode': 'form',
             'target': 'new',
-            'context': {
-                'default_doc_generation_id': self.id,
-                'form_view_initial_mode': 'edit',
-            },
         }
 
     # ------------------------------------------------------------------
@@ -190,7 +151,7 @@ class DocGeneration(models.Model):
         doc_module = self.env["doc.module"].create({
             "name": ir_module.shortdesc or module_name,
             "generation_id": self.id,
-            "technical_name": module_name,
+            "technical_name": module_name,   # always the TECHNICAL name e.g. dpf_events
             "description": module_doc,
         })
 
@@ -200,20 +161,35 @@ class DocGeneration(models.Model):
         doc_module.apply_manual_defaults()
         doc_module.build_functions_from_menus()
 
-        if self.enrich_from_project:
+        if self.enrich_from_project and self.project_task_project_id:
+            _logger.info(
+                'action_collect: enriching module=%s with project_id=%s',
+                module_name, self.project_task_project_id,
+            )
             self._run_enrichment(doc_module, overwrite=False)
+        elif self.enrich_from_project and not self.project_task_project_id:
+            _logger.info(
+                'action_collect: enrich_from_project=True but project_task_project_id=0 '
+                '(no project selected) — skipping enrichment for module=%s',
+                module_name,
+            )
 
         return doc_module
 
     def _run_enrichment(self, doc_module, overwrite=False):
         try:
             enricher = self.env['doc.project.enricher']
+            project_id = self.project_task_project_id or False
+            _logger.info(
+                '_run_enrichment: module=%s technical_name=%s project_id=%s overwrite=%s',
+                doc_module.name, doc_module.technical_name, project_id, overwrite,
+            )
             stats = enricher.enrich_module(
                 doc_module,
                 overwrite=overwrite,
-                project_id=self.project_task_project_id or False,
+                project_id=project_id,
             )
-            _logger.info('_run_enrichment: module=%s stats=%s', doc_module.technical_name, stats)
+            _logger.info('_run_enrichment: done, stats=%s', stats)
         except Exception:  # noqa: BLE001
             _logger.warning(
                 '_run_enrichment: failed for %s (non-fatal)',
@@ -224,17 +200,31 @@ class DocGeneration(models.Model):
         self.ensure_one()
         if not self.doc_module_ids:
             raise UserError(_("Сначала выполните «1. Собрать тексты»."))
+        if not self.project_task_project_id:
+            raise UserError(_(
+                'Не выбран проект. Укажите проект в поле '
+                '"Проект для обогащения" и повторите.'
+            ))
         total = {'menus_enriched': 0, 'functions_enriched': 0}
         for doc_module in self.doc_module_ids:
             try:
                 enricher = self.env['doc.project.enricher']
+                _logger.info(
+                    'action_enrich_from_tasks: module=%s technical_name=%s project_id=%s',
+                    doc_module.name, doc_module.technical_name,
+                    self.project_task_project_id,
+                )
                 stats = enricher.enrich_module(
                     doc_module,
                     overwrite=True,
-                    project_id=self.project_task_project_id or False,
+                    project_id=self.project_task_project_id,
                 )
                 total['menus_enriched'] += stats.get('menus_enriched', 0)
                 total['functions_enriched'] += stats.get('functions_enriched', 0)
+                _logger.info(
+                    'action_enrich_from_tasks: module=%s stats=%s',
+                    doc_module.technical_name, stats,
+                )
             except Exception:  # noqa: BLE001
                 _logger.warning(
                     'action_enrich_from_tasks: failed for %s',
@@ -412,7 +402,7 @@ class DocGeneration(models.Model):
                     lines.append("")
                 rows = model.field_table_json or []
                 if rows:
-                    lines.append("| Поле | Название | Тип | Обязателэное | Описание |")
+                    lines.append("| Поле | Название | Тип | Обязательное | Описание |")
                     lines.append("|------|-------|-----|-----------|---------|")
                     for r in rows:
                         lines.append("| `%s` | %s | %s | %s | %s |" % (

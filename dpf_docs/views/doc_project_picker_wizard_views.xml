@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_doc_project_picker_wizard_form" model="ir.ui.view">
+        <field name="name">doc.project.picker.wizard.form</field>
+        <field name="model">doc.project.picker.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Выберите проект">
+                <group>
+                    <field name="generation_id" invisible="1"/>
+                    <field name="project_m2o"
+                           string="Проект"
+                           options="{'no_create': True, 'no_open': True}"
+                           placeholder="Начните вводить название проекта..."
+                           autofocus="1"/>
+                    <field name="project_id_int" invisible="1"/>
+                    <field name="project_name" invisible="1"/>
+                </group>
+                <footer>
+                    <button name="action_confirm" type="object"
+                            string="Выбрать" class="btn-primary"/>
+                    <button name="action_cancel" type="object"
+                            string="Отмена" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+</odoo>
