@@ -52,7 +52,9 @@ class DocGeneration(models.Model):
         ),
     )
 
-    # Count of per-generation task snapshots (displayed in the form)
+    # Count of per-generation task snapshots (displayed in the form).
+    # Non-stored compute: no @api.depends — Odoo 19 forbids depends('id').
+    # Recomputed on every read, which is fine for a count badge.
     project_snapshot_count = fields.Integer(
         string="Per-run Snapshots",
         compute="_compute_project_snapshot_count",
@@ -82,10 +84,11 @@ class DocGeneration(models.Model):
     # ------------------------------------------------------------------
     # Computed fields
     # ------------------------------------------------------------------
-    @api.depends('id')
     def _compute_project_snapshot_count(self):
+        """Count per-generation task snapshots. No @api.depends — non-stored."""
+        Snapshot = self.env['doc.project.task.snapshot']
         for rec in self:
-            rec.project_snapshot_count = self.env['doc.project.task.snapshot'].search_count(
+            rec.project_snapshot_count = Snapshot.search_count(
                 [('generation_id', '=', rec.id)]
             )
 
