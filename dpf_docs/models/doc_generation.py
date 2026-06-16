@@ -359,9 +359,13 @@ class DocGeneration(models.Model):
         """
         Build doc.model.info records for all models defined by the module.
 
-        Uses introspector.get_module_models() which returns a list of dicts:
-            [{'model': 'dpf.event', 'name': 'Event', 'transient': False}, ...]
-        Then calls get_fields_meta() per model for field-level detail.
+        doc.model.info fields:
+            doc_module_id   Many2one  (required)
+            technical_name  Char      (required) — ORM model name e.g. 'dpf.event'
+            display_name    Char      — human-readable label e.g. 'Event'
+            description     Text
+            field_table_json Json
+            field_count     Integer
         """
         module_models = introspector.get_module_models(module_name)
         source_models = parsed.get("models", {})
@@ -372,13 +376,14 @@ class DocGeneration(models.Model):
             fields_meta = introspector.get_fields_meta(model_name)
             doc_str = source_models.get(model_name, {}).get("docstring", "")
             description = text_composer.compose_model_description(
-                entry.get("name", model_name), fields_meta, doc_str
+                model_name, fields_meta, doc_str
             )
             self.env["doc.model.info"].create({
                 "doc_module_id": doc_module.id,
-                "name": entry.get("name", model_name),
-                "model": model_name,
+                "technical_name": model_name,                      # was: 'model'
+                "display_name": entry.get("name", model_name),    # was: 'name'
                 "description": description,
+                "field_count": len(fields_meta) if fields_meta else 0,
             })
 
     def action_capture_screenshots(self):
