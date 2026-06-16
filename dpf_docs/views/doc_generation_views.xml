@@ -39,21 +39,18 @@
                             <!--
                                 project_task_project_name — Char field (compute/inverse).
                                 Resolved to project_task_project_id (Integer, no hard FK).
-                                Type name manually OR press 📂 to open a project picker
-                                dialog (action_pick_project, returned dynamically from Python
-                                only when project module is installed — no static XML action).
                             -->
-                            <label for="project_task_project_name" string="Проект для обогащения"/>
+                            <label for="project_task_project_name" string="Project for Enrichment"/>
                             <div class="o_field_widget">
                                 <div style="display:flex;gap:6px;align-items:center;">
                                     <field name="project_task_project_name"
                                            nolabel="1"
-                                           placeholder="Введите название проекта (напр. ЦПФ Этап 2)"
-                                           help="Название резолвится в ID проекта автоматически."/>
+                                           placeholder="e.g. ЦПФ Этап 2"
+                                           help="Project name is resolved to an ID automatically."/>
                                     <button name="action_pick_project" type="object"
-                                            string="📂" title="Выбрать проект из списка"
+                                            string="📂" title="Pick project from list"
                                             class="btn btn-sm btn-secondary"
-                                            help="Открыть список проектов для выбора"/>
+                                            help="Open project picker dialog"/>
                                 </div>
                                 <small class="text-muted" invisible="not project_task_project_id">
                                     ID: <field name="project_task_project_id" nolabel="1"
@@ -67,6 +64,27 @@
                             <field name="enrich_from_project"/>
                         </group>
                     </group>
+
+                    <!-- Project snapshot import section -->
+                    <group string="Project Task Snapshots"
+                           invisible="not enrich_from_project">
+                        <div style="display:flex;align-items:center;gap:12px;padding:4px 0;">
+                            <button name="action_reimport_project_tasks"
+                                    type="object"
+                                    string="⬇ Re-import from Project"
+                                    class="btn btn-secondary"
+                                    help="Download all tasks from the selected project into offline snapshots. Safe to run multiple times — previous snapshots are replaced."
+                                    invisible="not project_task_project_id"/>
+                            <field name="project_snapshot_count" nolabel="1" readonly="1"/>
+                            <span class="text-muted" invisible="not project_task_project_id">snapshots loaded</span>
+                        </div>
+                        <div class="alert alert-warning" role="alert"
+                             invisible="project_task_project_id != 0 and project_task_project_id">
+                            <p>Select a project above, then click <b>Re-import from Project</b>
+                            to download tasks before running enrichment.</p>
+                        </div>
+                    </group>
+
                     <notebook>
                         <page string="Documented Modules">
                             <field name="doc_module_ids" readonly="1">
@@ -81,28 +99,26 @@
                         </page>
                         <page string="How it works">
                             <div class="alert alert-info" role="alert">
-                                <p><b>Шаг 1</b> — Collect Texts: сбор меню, моделей и функций.</p>
-                                <p><b>Шаг 2</b> — Capture Screenshots: загрузите скриншоты вручную.</p>
-                                <p><b>Шаг 3</b> — Render Markdown / Print PDF / Download Word.</p>
-                                <p><b>Шаг 4 — Enrich from Tasks</b>: повторно читает задачи проекта
-                                и заполняет поля функций/меню. Запускайте в любое время после
-                                редактирования задач.</p>
+                                <p><b>Step 1</b> — Collect Texts: collects menus, models and functions.</p>
+                                <p><b>Step 2</b> — Capture Screenshots: upload screenshots manually.</p>
+                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.</p>
+                                <p><b>Step 4 — Enrich from Tasks</b>: reads project task snapshots
+                                and fills function/menu fields. Run any time after editing tasks.</p>
                                 <hr/>
-                                <p><b>Структура задач в проекте:</b></p>
-                                <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Проект (напр. «ЦПФ Этап 2»)
-└── [Main task] Разработка модулей ...
-     ├── [dpf_events] Название функции 1   ← «родительская»
-     │    ├── Подзадача 1  (Описание/Требования/Порядок/Результат)
-     │    └── Подзадача 2
-     ├── [dpf_events] Название функции 2
-     │    └── Подзадача 3
+                                <p><b>Task structure in the project:</b></p>
+                                <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Project (e.g. «ЦПФ Этап 2»)
+└── [Main task] Module development ...
+     ├── [dpf_events] Feature title 1   ← module parent task
+     │    ├── Subtask 1  (Description/Requirements/Steps/Result)
+     │    └── Subtask 2
+     ├── [dpf_events] Feature title 2
+     │    └── Subtask 3
      └── [dpf_news] ...
           └── ...</pre>
-                                <p>Система ищет задачи, название которых начинается с
-                                <code>[имя_модуля]</code>, например <code>[dpf_events]</code>.
-                                Затем берёт их подзадачи и сопоставляет с функциями
-                                документации по схожести названий (Jaccard ≥ 0.30).</p>
-                                <p><b>Разделы в описании подзадачи:</b></p>
+                                <p>The system matches tasks whose name starts with
+                                <code>[module_name]</code>, e.g. <code>[dpf_events]</code>,
+                                then maps their subtasks to doc functions by Jaccard similarity ≥ 0.30.</p>
+                                <p><b>Sections recognised in subtask description:</b></p>
                                 <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Описание:
 ...
 
@@ -114,7 +130,8 @@
 
 Результат:
 ...</pre>
-                                <p>Если разделов нет — всё описание попадает в поле «Описание» функции.</p>
+                                <p>If no sections are present, the entire description goes into the
+                                function's Description field.</p>
                             </div>
                         </page>
                     </notebook>
@@ -132,6 +149,7 @@
                 <field name="name"/>
                 <field name="module_ids" widget="many2many_tags"/>
                 <field name="project_task_project_name"/>
+                <field name="project_snapshot_count" string="Snapshots"/>
                 <field name="state"/>
                 <field name="create_date"/>
             </list>
