@@ -11,10 +11,11 @@ Design notes
   are stringified project IDs.
 
 - After confirming, the wizard writes project_task_project_id +
-  project_task_project_name to doc.generation and reopens the same
-  doc.generation record via act_window.  This is the reliable pattern for
-  Odoo 19 dialogs that need to refresh the parent form: returning tag='reload'
-  from inside a dialog does NOT reliably reload the parent view.
+  project_task_project_name to doc.generation and returns a 'reload' client
+  action so the parent form view refreshes in place without navigating away.
+  This is the correct pattern for Odoo 19 dialogs that need to refresh the
+  parent form: returning act_window reopens the whole form and loses scroll
+  position; 'reload' just refreshes the current view.
 
 - required=True is intentionally NOT set on project_selection at the field
   level to avoid a DB NOT NULL constraint error during module upgrade when
@@ -88,10 +89,13 @@ class DocProjectPickerWizard(models.TransientModel):
 
     def action_confirm(self):
         """
-        Write the selected project to doc.generation and reopen that record.
+        Write the selected project to doc.generation and reload the parent form.
 
         Validation of project_selection is done here (not via field required=True)
         to avoid the DB NOT NULL constraint upgrade error.
+
+        Returns a 'reload' client action so the parent doc.generation form
+        refreshes in place and shows the newly saved project name.
         """
         self.ensure_one()
         gen = self.generation_id
@@ -118,15 +122,10 @@ class DocProjectPickerWizard(models.TransientModel):
             'project_task_project_name': project.name,
         })
 
-        # Reopen the parent doc.generation record — closes the dialog and
-        # refreshes the form with the newly saved project values.
-        return {
-            'type': 'ir.actions.act_window',
-            'res_model': 'doc.generation',
-            'res_id': gen.id,
-            'view_mode': 'form',
-            'target': 'current',
-        }
+        # 'reload' refreshes the current view (parent generation form) without
+        # navigating away.  This is the correct way to close a dialog and
+        # update the parent in Odoo 17+.
+        return {'type': 'ir.actions.client', 'tag': 'reload'}
 
     def action_cancel(self):
         """Close the dialog without saving."""

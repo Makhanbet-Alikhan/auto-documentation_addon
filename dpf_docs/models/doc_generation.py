@@ -97,8 +97,6 @@ class DocGeneration(models.Model):
         self.ensure_one()
         if 'project.project' not in self.env:
             raise UserError(_("The 'project' module is not installed."))
-        # Only pass generation_id — project_name field no longer exists
-        # on the wizard after the picker rewrite.
         wizard = self.env['doc.project.picker.wizard'].create({
             'generation_id': self.id,
         })
@@ -116,7 +114,7 @@ class DocGeneration(models.Model):
         self.ensure_one()
         if not self.project_task_project_id:
             raise UserError(_(
-                'No project selected. Use the 📂 button to pick a project first.'
+                'No project selected. Use the \U0001f4c2 button to pick a project first.'
             ))
         result = self.env['doc.project.task.snapshot'].import_from_project(
             self.id, self.project_task_project_id
@@ -352,13 +350,87 @@ class DocGeneration(models.Model):
                 "field_count": len(fields_meta) if fields_meta else 0,
             })
 
+    # ------------------------------------------------------------------
+    # Screenshots — graceful degradation when Playwright not installed
+    # ------------------------------------------------------------------
     def action_capture_screenshots(self):
+        """Capture screenshots for all documented modules in this generation.
+
+        If Playwright is not installed the user sees a friendly notification
+        instead of a crash. Screenshots will be added via a separate module.
+        """
         self.ensure_one()
         capturer = self.env['doc.screenshot.capturer']
-        capturer.capture_all(self)
-        return True
 
+        if not capturer.is_available():
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('Screenshots not available'),
+                    'message': _(
+                        'Automatic screenshots require the Playwright package.\n'
+                        'Install it with:\n'
+                        '  pip install playwright\n'
+                        '  playwright install --with-deps chromium\n\n'
+                        'You can upload screenshots manually on each function.'
+                        ' Screenshot automation will be added via a separate module.'
+                    ),
+                    'type': 'warning',
+                    'sticky': True,
+                },
+            }
+
+        captured_total = 0
+        failed_total = 0
+        for doc_module in self.doc_module_ids:
+            try:
+                result = capturer.capture_module(doc_module, only_missing=True)
+                captured_total += result.get('captured', 0)
+                failed_total += result.get('failed', 0)
+            except Exception as exc:
+                _logger.warning(
+                    'action_capture_screenshots: module=%s error=%s',
+                    doc_module.technical_name, exc, exc_info=True,
+                )
+                failed_total += 1
+
+        msg_type = 'success' if failed_total == 0 else 'warning'
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Screenshots done'),
+                'message': _('Captured: %s  Failed: %s') % (captured_total, failed_total),
+                'type': msg_type,
+                'sticky': failed_total > 0,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Export: Word
+    # ------------------------------------------------------------------
     def action_download_word(self):
         self.ensure_one()
         exporter = self.env['doc.word.export']
         return exporter.export_generation(self)
+
+    # ------------------------------------------------------------------
+    # Export: PDF via QWeb report
+    # ------------------------------------------------------------------
+    def action_download_pdf(self):
+        """Render the generation as a PDF using the built-in QWeb report engine.
+
+        The report XML id is 'dpf_docs.report_doc_generation_pdf'.  If the
+        report template does not exist yet a friendly UserError is shown.
+        """
+        self.ensure_one()
+        report_xmlid = 'dpf_docs.report_doc_generation_pdf'
+        report = self.env.ref(report_xmlid, raise_if_not_found=False)
+        if not report:
+            raise UserError(_(
+                'PDF report template not found (xml_id: %s).\n'
+                'Make sure the report view is defined in dpf_docs/report/*.xml '
+                'and the module has been upgraded.'
+            ) % report_xmlid)
+        return report.report_action(self)
