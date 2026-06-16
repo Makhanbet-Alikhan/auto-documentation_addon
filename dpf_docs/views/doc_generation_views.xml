@@ -20,6 +20,9 @@
                     <button name="action_download_word" type="object"
                             string="Download Word"
                             invisible="state in ('draft',)"/>
+                    <button name="action_download_pdf" type="object"
+                            string="Download PDF"
+                            invisible="state in ('draft',)"/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
@@ -40,53 +43,66 @@
                     <!-- Task enrichment source -->
                     <group string="Task Enrichment Source"
                            invisible="not enrich_from_project">
-                        <group>
+                        <group string="Option A: Global Snapshot Set (recommended)">
                             <field name="snapshot_set_id"
                                    options="{'no_create': True}"
-                                   help="Pick a pre-downloaded global snapshot set. Faster — no re-download needed for each run."/>
+                                   help="Pick a pre-downloaded global snapshot set."/>
                         </group>
-                        <group>
+                        <group string="Option B: Per-run import from Project module">
+                            <!-- Step 1: type project name -->
                             <label for="project_task_project_name"
-                                   string="— or — Project Name (per-run)"/>
+                                   string="1. Type project name"/>
                             <div class="o_field_widget">
                                 <div style="display:flex;gap:6px;align-items:center;">
                                     <field name="project_task_project_name"
                                            nolabel="1"
-                                           placeholder="e.g. ЦПФ Этап 2"/>
-                                    <button name="action_pick_project" type="object"
-                                            string="📂"
-                                            title="Pick project from list"
-                                            class="btn btn-sm btn-secondary"/>
+                                           placeholder="e.g. ЦПФ Этап 2"
+                                           style="flex:1;"/>
+                                    <button name="action_find_project"
+                                            type="object"
+                                            string="🔍 Find &amp; Save Project"
+                                            class="btn btn-secondary"
+                                            title="Search for project by name and link it to this run"/>
                                 </div>
-                                <small class="text-muted"
-                                       invisible="not project_task_project_id">
-                                    ID: <field name="project_task_project_id"
-                                              nolabel="1" readonly="1"
-                                              style="display:inline;width:auto;"/>
-                                </small>
+                                <!-- Show linked project ID once saved -->
+                                <div invisible="not project_task_project_id"
+                                     style="margin-top:4px;color:#6c757d;font-size:12px;">
+                                    ✅ Linked: <field name="project_task_project_id"
+                                                     nolabel="1" readonly="1"
+                                                     style="display:inline;width:60px;"/> (id)
+                                </div>
+                            </div>
+                            <!-- Step 2: import tasks -->
+                            <label string="2. Import tasks into snapshot"/>
+                            <div>
+                                <button name="action_reimport_project_tasks"
+                                        type="object"
+                                        string="⬇ Re-import from Project"
+                                        class="btn btn-secondary"
+                                        help="Download tasks from the linked project into per-run snapshots."/>
+                                <span invisible="not project_task_project_id"
+                                      style="margin-left:8px;color:#6c757d;font-size:12px;">
+                                    <field name="project_snapshot_count"
+                                           nolabel="1" readonly="1"
+                                           style="display:inline;width:40px;"/> snapshots loaded
+                                </span>
                             </div>
                         </group>
-                        <div style="display:flex;align-items:center;gap:12px;padding:4px 0;">
-                            <button name="action_reimport_project_tasks"
-                                    type="object"
-                                    string="⬇ Re-import from Project"
-                                    class="btn btn-secondary"
-                                    help="Download tasks into a per-run snapshot."/>
-                            <span invisible="not project_task_project_id">
-                                <field name="project_snapshot_count"
-                                       nolabel="1" readonly="1"/>
-                                per-run snapshots loaded
-                            </span>
-                        </div>
+
                         <div class="alert alert-info" role="alert"
                              invisible="snapshot_set_id or project_task_project_id">
                             <p>
-                                <b>No snapshot source selected.</b> Either:
+                                <b>How to link a project (Option B):</b>
                             </p>
-                            <ul>
-                                <li>Select a <b>Global Snapshot Set</b> (Tools &gt; Documentation &gt; Project Snapshots), or</li>
-                                <li>Type a project name above and click <b>⬇ Re-import from Project</b>.</li>
-                            </ul>
+                            <ol style="margin:4px 0 0 16px;">
+                                <li>Type the project name in the field above</li>
+                                <li>Click <b>🔍 Find &amp; Save Project</b></li>
+                                <li>Click <b>⬇ Re-import from Project</b></li>
+                            </ol>
+                            <p style="margin-top:6px;">
+                                Or use <b>Option A</b>: create a reusable snapshot set at
+                                <i>Tools &gt; Documentation &gt; Project Snapshots</i>
+                            </p>
                         </div>
                     </group>
 
@@ -107,22 +123,16 @@
                                 <p><b>Step 1</b> — Collect Texts: collects menus, models and functions.</p>
                                 <p><b>Step 2</b> — Capture Screenshots: upload or auto-capture.</p>
                                 <p><b>Step 3</b> — Enrich from Tasks: reads task snapshots and creates doc.function records.</p>
-                                <p><b>Step 4</b> — Download Word: export final documentation.</p>
+                                <p><b>Step 4</b> — Download Word / PDF.</p>
                                 <hr/>
                                 <p><b>Expected task structure in the project:</b></p>
                                 <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Project (e.g. «ЦПФ Этап 2»)
 └── [Main task] Module development ...
      ├── [dpf_events] Feature title 1   ← tag = module technical_name
-     │    ├── Subtask 1  (Описание / Требования / Порядок / Результат)
+     │    ├── Subtask 1
      │    └── Subtask 2
      └── [dpf_news] ...
           └── ...</pre>
-                                <p>The enricher matches tasks whose name starts with
-                                <code>[module_technical_name]</code>,
-                                e.g. <code>[dpf_events]</code>, then creates
-                                one <b>doc.function</b> per child subtask.
-                                No name translation is required — matching is by <code>[tag]</code>
-                                prefix only.</p>
                             </div>
                         </page>
                     </notebook>

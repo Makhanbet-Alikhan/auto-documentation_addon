@@ -37,7 +37,7 @@ class DocGeneration(models.Model):
     )
     project_task_project_name = fields.Char(
         string="Project Name",
-        help="Name of the selected project (resolved to project_task_project_id).",
+        help="Type the project name here, then click 'Find & Save'.",
     )
 
     # Global snapshot set (preferred over per-generation import)
@@ -90,31 +90,102 @@ class DocGeneration(models.Model):
             )
 
     # ------------------------------------------------------------------
-    # Project picker wizard button
+    # Project: find by name typed directly in the form
     # ------------------------------------------------------------------
-    def action_pick_project(self):
-        """Open the project picker wizard."""
+    def action_find_project(self):
+        """Search for a project by the name typed in project_task_project_name.
+
+        Writes project_task_project_id + project_task_project_name on the
+        current record immediately (no dialog needed) and shows a notification.
+        If multiple projects match, shows the list so the user can be more
+        specific.  If exactly one matches, saves it.
+
+        This is the replacement for the picker wizard: editing a field and
+        pressing a button on the *same* form record is the only approach in
+        Odoo 17-19 that reliably persists data without reload / dialog tricks.
+        """
         self.ensure_one()
         if 'project.project' not in self.env:
             raise UserError(_("The 'project' module is not installed."))
-        wizard = self.env['doc.project.picker.wizard'].create({
-            'generation_id': self.id,
-        })
-        return {
-            'name': _('Select Project'),
-            'type': 'ir.actions.act_window',
-            'res_model': 'doc.project.picker.wizard',
-            'res_id': wizard.id,
-            'view_mode': 'form',
-            'target': 'new',
-        }
+
+        query = (self.project_task_project_name or '').strip()
+        if not query:
+            raise UserError(_(
+                'Type a project name in the "Project Name" field first, '
+                'then click Find & Save.'
+            ))
+
+        Project = self.env['project.project'].sudo()
+        projects = Project.search([('name', 'ilike', query)], order='name asc', limit=20)
+
+        if not projects:
+            raise UserError(_(
+                'No project found matching "%s".\n'
+                'Check the spelling — the search is case-insensitive.'
+            ) % query)
+
+        if len(projects) == 1:
+            # Exact single match — save directly.
+            self.write({
+                'project_task_project_id': projects.id,
+                'project_task_project_name': projects.name,
+            })
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('Project saved'),
+                    'message': _('Project "%s" (id=%s) linked. '
+                                 'Click \u2b07 Re-import to load tasks.'
+                                 ) % (projects.name, projects.id),
+                    'type': 'success',
+                    'sticky': False,
+                },
+            }
+
+        # Multiple matches — save the first exact-name match if any,
+        # otherwise list all options and ask user to be more specific.
+        exact = projects.filtered(lambda p: p.name.lower() == query.lower())
+        if len(exact) == 1:
+            self.write({
+                'project_task_project_id': exact.id,
+                'project_task_project_name': exact.name,
+            })
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('Project saved'),
+                    'message': _('Project "%s" (id=%s) linked.')
+                               % (exact.name, exact.id),
+                    'type': 'success',
+                    'sticky': False,
+                },
+            }
+
+        names = '\n'.join('  • %s (id=%s)' % (p.name, p.id) for p in projects)
+        raise UserError(_(
+            'Multiple projects match "%s":\n%s\n\n'
+            'Make the name more specific or copy-paste the exact name.'
+        ) % (query, names))
+
+    # ------------------------------------------------------------------
+    # Legacy wizard button — kept for backward compat, now just a hint
+    # ------------------------------------------------------------------
+    def action_pick_project(self):
+        """Legacy: redirect user to inline find approach."""
+        raise UserError(_(
+            'Type the project name in the "Project Name" field '
+            'and click "🔍 Find & Save Project" next to it.'
+        ))
 
     def action_reimport_project_tasks(self):
         """Re-download tasks from project.project into per-generation snapshots."""
         self.ensure_one()
         if not self.project_task_project_id:
             raise UserError(_(
-                'No project selected. Use the \U0001f4c2 button to pick a project first.'
+                'No project linked yet.\n'
+                'Type the project name and click "Find & Save" first.'
             ))
         result = self.env['doc.project.task.snapshot'].import_from_project(
             self.id, self.project_task_project_id
@@ -124,7 +195,10 @@ class DocGeneration(models.Model):
             'tag': 'display_notification',
             'params': {
                 'title': _('Import complete'),
-                'message': _('%s task snapshots imported from project.') % result.get('imported', 0),
+                'message': _('%s task snapshots imported from "%s".') % (
+                    result.get('imported', 0),
+                    self.project_task_project_name or str(self.project_task_project_id),
+                ),
                 'type': 'success',
                 'sticky': False,
             },
@@ -249,7 +323,8 @@ class DocGeneration(models.Model):
             raise UserError(_(
                 'No snapshot source configured. Either:\n'
                 '  \u2022 Select a Global Snapshot Set, or\n'
-                '  \u2022 Pick a project and click "Re-import from Project".'
+                '  \u2022 Type a project name, click "Find & Save", '
+                'then click "Re-import from Project".'
             ))
 
         if not self.snapshot_set_id and self.project_task_project_id:
@@ -370,11 +445,10 @@ class DocGeneration(models.Model):
                     'title': _('Screenshots not available'),
                     'message': _(
                         'Automatic screenshots require the Playwright package.\n'
-                        'Install it with:\n'
-                        '  pip install playwright\n'
-                        '  playwright install --with-deps chromium\n\n'
-                        'You can upload screenshots manually on each function.'
-                        ' Screenshot automation will be added via a separate module.'
+                        'Install with: pip install playwright && '
+                        'playwright install --with-deps chromium\n\n'
+                        'Screenshot automation will be added via a separate module. '
+                        'Until then upload screenshots manually on each function.'
                     ),
                     'type': 'warning',
                     'sticky': True,
@@ -419,11 +493,7 @@ class DocGeneration(models.Model):
     # Export: PDF via QWeb report
     # ------------------------------------------------------------------
     def action_download_pdf(self):
-        """Render the generation as a PDF using the built-in QWeb report engine.
-
-        The report XML id is 'dpf_docs.report_doc_generation_pdf'.  If the
-        report template does not exist yet a friendly UserError is shown.
-        """
+        """Render the generation as a PDF using the built-in QWeb report engine."""
         self.ensure_one()
         report_xmlid = 'dpf_docs.report_doc_generation_pdf'
         report = self.env.ref(report_xmlid, raise_if_not_found=False)
