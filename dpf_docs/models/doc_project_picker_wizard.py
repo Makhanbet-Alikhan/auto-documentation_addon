@@ -15,6 +15,11 @@ Design notes
   doc.generation record via act_window.  This is the reliable pattern for
   Odoo 19 dialogs that need to refresh the parent form: returning tag='reload'
   from inside a dialog does NOT reliably reload the parent view.
+
+- required=True is intentionally NOT set on project_selection at the field
+  level to avoid a DB NOT NULL constraint error during module upgrade when
+  the transient table already contains NULL rows from the previous schema.
+  Validation is enforced in action_confirm() via UserError instead.
 """
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
@@ -31,15 +36,13 @@ class DocProjectPickerWizard(models.TransientModel):
         ondelete='cascade',
     )
 
-    # Stores the chosen project as a string-encoded integer ID
-    # (Selection values must be strings in Odoo).
+    # Selection value = str(project.id) so we never do ilike name resolution.
+    # required=True is NOT set here on purpose — see module docstring.
     project_selection = fields.Selection(
         selection='_get_project_selection',
         string='Project',
-        required=True,
     )
 
-    # Human-readable label kept in sync with project_selection (display only)
     project_display_name = fields.Char(
         string='Selected project',
         readonly=True,
@@ -87,11 +90,8 @@ class DocProjectPickerWizard(models.TransientModel):
         """
         Write the selected project to doc.generation and reopen that record.
 
-        Returning an ir.actions.act_window that targets the same record causes
-        Odoo to close the dialog and navigate to (or refresh) the generation
-        form — reliably showing the newly saved project name.  This is
-        preferable to tag='reload' which reloads the whole browser page and
-        loses the user's scroll position / unsaved state on unrelated fields.
+        Validation of project_selection is done here (not via field required=True)
+        to avoid the DB NOT NULL constraint upgrade error.
         """
         self.ensure_one()
         gen = self.generation_id
