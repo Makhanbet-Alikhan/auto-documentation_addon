@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Persistent snapshot of project.task data imported from the Project module.
+Persistent snapshot of project.task data.
 
-Once tasks are imported here the enricher reads ONLY from these snapshot
-records — no live queries against project.task happen during generation.
-The Project module can therefore be uninstalled or its tasks deleted without
-affecting existing enrichment.
+Each record represents one task imported from project.task.
+Can be attached to either:
+  * snapshot_set_id  (doc.project.snapshot.set)  — global shared pool
+  * generation_id    (doc.generation)             — legacy per-run pool
 
-Snapshot records are attached to a doc.generation run (many-to-one) so each
-generation keeps its own isolated copy. They can be refreshed at any time via
-the "Re-import from Project" button on the generation form.
+Exactly one of these is non-null on each record.
 """
 import logging
 import re
@@ -18,12 +16,11 @@ from odoo import _, api, fields, models
 
 _logger = logging.getLogger(__name__)
 
-# Matches leading [tag] prefix, e.g. "[dpf_events] Создание мероприятий"
 _TAG_RE = re.compile(r'^\[(?P<tag>[\w]+)\]\s*', flags=re.UNICODE)
 
 
 def _strip_tag(name):
-    """Return (tag, clean_name) from a task name like '[dpf_events] Some text'."""
+    """Return (tag, clean_name) from '[dpf_events] Some text'."""
     if not name:
         return '', ''
     m = _TAG_RE.match(name)
@@ -52,25 +49,25 @@ class DocProjectTaskSnapshot(models.Model):
 
     _name = 'doc.project.task.snapshot'
     _description = 'Auto Doc - Project Task Snapshot'
-    _order = 'generation_id, depth, sequence, id'
+    _order = 'depth, sequence, id'
 
+    # Parent: one of these two is set, the other is False
+    snapshot_set_id = fields.Many2one(
+        'doc.project.snapshot.set',
+        string='Snapshot Set (global)',
+        ondelete='cascade',
+        index=True,
+    )
     generation_id = fields.Many2one(
         'doc.generation',
-        string='Generation Run',
-        required=True,
+        string='Generation Run (legacy)',
         ondelete='cascade',
         index=True,
     )
 
     # Original task identity — for traceability only, NOT a live FK
-    original_task_id = fields.Integer(
-        string='Original task.id',
-        help='ID of the project.task at import time. For traceability only.',
-    )
-    original_project_id = fields.Integer(
-        string='Original project.id',
-        help='ID of the project.project at import time.',
-    )
+    original_task_id = fields.Integer(string='Original task.id')
+    original_project_id = fields.Integer(string='Original project.id')
 
     # Task content snapshot
     name = fields.Char(string='Task Name', required=True)
@@ -79,24 +76,20 @@ class DocProjectTaskSnapshot(models.Model):
         help='HTML description stripped to plain text at import time.',
     )
 
-    # Derived / indexed fields for fast lookup
+    # Derived fields for fast lookup
     module_tag = fields.Char(
         string='Module Tag',
         index=True,
-        help='Lower-cased [tag] extracted from the task name prefix at import time.',
+        help='Lower-cased [tag] extracted from the task name prefix.',
     )
     name_clean = fields.Char(
         string='Clean Name',
         help='Task name with the [tag] prefix removed.',
     )
 
-    # Tree structure mirrored from the original task hierarchy
-    # depth 0 = top-level task in project ("main tasks" / parent containers)
-    # depth 1 = child of main task  ("module parent task" tagged [dpf_events])
-    # depth 2 = grandchild          ("functional subtask" with descriptions)
+    # Tree structure
     depth = fields.Integer(string='Depth', default=0)
     sequence = fields.Integer(string='Sequence', default=10)
-
     parent_snapshot_id = fields.Many2one(
         'doc.project.task.snapshot',
         string='Parent Snapshot',
@@ -108,54 +101,68 @@ class DocProjectTaskSnapshot(models.Model):
         string='Child Snapshots',
     )
 
+    # ------------------------------------------------------------------
+    # Import helpers
+    # ------------------------------------------------------------------
+
+    @api.model
+    def import_into_set(self, snapshot_set_id, project_id):
+        """
+        Import all tasks from project_id into a global snapshot set.
+
+        Deletes previous snapshots for this set first. Safe to call multiple
+        times (idempotent refresh).
+
+        Returns dict {'imported': N, 'skipped': N}.
+        """
+        return self._do_import(
+            project_id=project_id,
+            snapshot_set_id=snapshot_set_id,
+            generation_id=False,
+        )
+
     @api.model
     def import_from_project(self, generation_id, project_id):
         """
-        Pull all tasks from project_id into snapshot records for generation_id.
+        Legacy API — import into a per-generation pool.
 
-        Traverses the full task hierarchy:
-            project.task (root tasks)                  depth=0
-            └── project.task (module parent tasks)     depth=1  (tagged [dpf_events])
-                 └── project.task (functional tasks)   depth=2  (contain descriptions)
-
-        Safe to call multiple times — deletes previous snapshots first.
-
-        Parameters
-        ----------
-        generation_id : int
-        project_id    : int  (project.project id)
-
-        Returns
-        -------
-        dict with keys 'imported' and 'skipped'
+        Kept for backward compatibility with doc_generation_project_mixin.
         """
+        return self._do_import(
+            project_id=project_id,
+            snapshot_set_id=False,
+            generation_id=generation_id,
+        )
+
+    @api.model
+    def _do_import(self, project_id, snapshot_set_id=False, generation_id=False):
+        """Core import logic shared by both public APIs."""
         if not project_id:
-            _logger.warning(
-                'import_from_project: project_id is falsy — nothing imported'
-            )
+            _logger.warning('_do_import: project_id is falsy — nothing imported')
             return {'imported': 0, 'skipped': 0}
 
         if 'project.task' not in self.env:
             _logger.warning(
-                'import_from_project: project.task model not available '
+                '_do_import: project.task model not available '
                 '(project module not installed)'
             )
             return {'imported': 0, 'skipped': 0}
 
         Task = self.env['project.task'].sudo()
 
-        # Verify the project exists before doing anything
         if 'project.project' in self.env:
             project = self.env['project.project'].sudo().browse(project_id)
             if not project.exists():
                 _logger.warning(
-                    'import_from_project: project.project id=%s does not exist',
-                    project_id,
+                    '_do_import: project.project id=%s does not exist', project_id
                 )
                 return {'imported': 0, 'skipped': 0}
 
-        # Delete any previous snapshots for this generation
-        self.search([('generation_id', '=', generation_id)]).unlink()
+        # Delete previous snapshots for this container
+        if snapshot_set_id:
+            self.search([('snapshot_set_id', '=', snapshot_set_id)]).unlink()
+        else:
+            self.search([('generation_id', '=', generation_id)]).unlink()
 
         # Load ALL tasks in the project (including archived) in one query
         all_tasks = Task.search(
@@ -163,12 +170,12 @@ class DocProjectTaskSnapshot(models.Model):
             order='id asc',
         )
         _logger.info(
-            'import_from_project: project_id=%s — found %s tasks total',
+            '_do_import: project_id=%s — found %s tasks',
             project_id, len(all_tasks),
         )
 
         task_by_id = {t.id: t for t in all_tasks}
-        snap_by_task_id = {}   # original task.id → snapshot record id
+        snap_by_task_id = {}
         imported = 0
 
         for task in all_tasks:
@@ -178,18 +185,16 @@ class DocProjectTaskSnapshot(models.Model):
             while current.parent_id and current.parent_id.id in task_by_id:
                 depth += 1
                 current = task_by_id[current.parent_id.id]
-                if depth > 10:   # safety guard against accidental cycles
+                if depth > 10:
                     break
 
             tag, clean = _strip_tag(task.name or '')
 
-            # Resolve parent snapshot id (if parent was already processed)
             parent_snap_id = False
             if task.parent_id and task.parent_id.id in snap_by_task_id:
                 parent_snap_id = snap_by_task_id[task.parent_id.id]
 
-            snap = self.create({
-                'generation_id': generation_id,
+            vals = {
                 'original_task_id': task.id,
                 'original_project_id': project_id,
                 'name': task.name or '',
@@ -199,12 +204,18 @@ class DocProjectTaskSnapshot(models.Model):
                 'depth': depth,
                 'sequence': getattr(task, 'sequence', 10) or 10,
                 'parent_snapshot_id': parent_snap_id or False,
-            })
+            }
+            if snapshot_set_id:
+                vals['snapshot_set_id'] = snapshot_set_id
+            else:
+                vals['generation_id'] = generation_id
+
+            snap = self.create(vals)
             snap_by_task_id[task.id] = snap.id
             imported += 1
 
         _logger.info(
-            'import_from_project: generation_id=%s imported=%s',
-            generation_id, imported,
+            '_do_import: container=set:%s/gen:%s imported=%s',
+            snapshot_set_id, generation_id, imported,
         )
         return {'imported': imported, 'skipped': 0}

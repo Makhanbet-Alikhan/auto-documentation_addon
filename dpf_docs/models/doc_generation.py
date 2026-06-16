@@ -22,48 +22,58 @@ class DocGeneration(models.Model):
     _order = "create_date desc"
 
     name = fields.Char(
-        string="Название", required=True, default=lambda self: _("Новый запуск")
+        string="Name", required=True, default=lambda self: _("New Run")
     )
     module_ids = fields.Many2many(
         "ir.module.module",
-        string="Установленные модули",
+        string="Installed Modules",
         domain="[('state', '=', 'installed')]",
     )
     module_names = fields.Char(
-        string="Дополнительные модули",
-        help="Необязательно. Технические названия через запятую.",
+        string="Additional Modules",
+        help="Optional. Comma-separated technical names.",
     )
 
     # Soft dependency on project.project — no hard FK.
     project_task_project_id = fields.Integer(
-        string="ID Проекта",
+        string="Project ID",
         default=0,
         help="Internal: stores project.project id without a hard FK.",
     )
     project_task_project_name = fields.Char(
-        string="Проект для обогащения",
+        string="Project Name",
+        help="Name of the selected project (resolved to project_task_project_id).",
+    )
+
+    # Global snapshot set (preferred over per-generation import)
+    snapshot_set_id = fields.Many2one(
+        'doc.project.snapshot.set',
+        string='Global Snapshot Set',
+        ondelete='set null',
         help=(
-            'Укажите название Odoo-проекта или нажмите 📂 для выбора.'
+            'Select a pre-downloaded snapshot set (Tools > Documentation > '
+            'Project Snapshots). When set, enrichment reads from the global '
+            'set instead of downloading tasks again for each run.'
         ),
     )
 
     state = fields.Selection(
         [
-            ("draft", "Черновик"),
-            ("collected", "Тексты собраны"),
-            ("awaiting_shots", "Ожидает скриншоты"),
-            ("done", "Готово"),
+            ("draft", "Draft"),
+            ("collected", "Texts Collected"),
+            ("awaiting_shots", "Awaiting Screenshots"),
+            ("done", "Done"),
         ],
-        string="Статус",
+        string="State",
         default="draft",
         tracking=True,
     )
     doc_module_ids = fields.One2many(
-        "doc.module", "generation_id", string="Задокументированные модули"
+        "doc.module", "generation_id", string="Documented Modules"
     )
-    use_llm_caption = fields.Boolean(string="Использовать LLM-подписи")
+    use_llm_caption = fields.Boolean(string="Use LLM Captions")
     enrich_from_project = fields.Boolean(
-        string="Обогатить из Project Tasks",
+        string="Enrich from Project Tasks",
         default=True,
     )
 
@@ -71,16 +81,16 @@ class DocGeneration(models.Model):
     # Project picker wizard button
     # ------------------------------------------------------------------
     def action_pick_project(self):
-        """Open the project picker wizard (target=new dialog)."""
+        """Open the project picker wizard."""
         self.ensure_one()
         if 'project.project' not in self.env:
-            raise UserError(_("Модуль 'project' не установлен в данной системе."))
+            raise UserError(_("The 'project' module is not installed."))
         wizard = self.env['doc.project.picker.wizard'].create({
             'generation_id': self.id,
             'project_name': self.project_task_project_name or '',
         })
         return {
-            'name': _('Выберите проект'),
+            'name': _('Select Project'),
             'type': 'ir.actions.act_window',
             'res_model': 'doc.project.picker.wizard',
             'res_id': wizard.id,
@@ -93,7 +103,7 @@ class DocGeneration(models.Model):
     # ------------------------------------------------------------------
     @api.onchange('module_ids')
     def _onchange_module_ids(self):
-        default_name = _("Новый запуск")
+        default_name = _("New Run")
         current_name = (self.name or '').strip()
         if current_name and current_name != default_name:
             return
@@ -105,7 +115,7 @@ class DocGeneration(models.Model):
             self.name = auto_name
 
     # ------------------------------------------------------------------
-    # Step 1-4: collect texts + structure
+    # Step 1: collect texts
     # ------------------------------------------------------------------
     def _resolve_module_names(self):
         names = list(self.module_ids.mapped("name"))
@@ -119,7 +129,23 @@ class DocGeneration(models.Model):
         self.ensure_one()
         modules = self._resolve_module_names()
         if not modules:
-            raise UserError(_("Выберите хотя бы один модуль для документирования."))
+            raise UserError(_("Select at least one module to document."))
+
+        # Pre-import per-generation snapshots if no global set is selected
+        if self.enrich_from_project and not self.snapshot_set_id:
+            if self.project_task_project_id:
+                _logger.info(
+                    'action_collect: no snapshot_set — importing per-gen snaps '
+                    'for project_id=%s', self.project_task_project_id
+                )
+                self.env['doc.project.task.snapshot'].import_from_project(
+                    self.id, self.project_task_project_id
+                )
+            else:
+                _logger.info(
+                    'action_collect: enrich_from_project=True but no project '
+                    'and no snapshot_set — skipping snapshot import'
+                )
 
         introspector = self.env["doc.introspector"]
         parser = self.env["doc.source.parser"]
@@ -136,7 +162,7 @@ class DocGeneration(models.Model):
             [("name", "=", module_name)], limit=1
         )
         if not ir_module:
-            raise UserError(_("Модуль '%s' не установлен.") % module_name)
+            raise UserError(_("Module '%s' is not installed.") % module_name)
 
         parsed = parser.parse_module(module_name)
         manifest = {
@@ -160,36 +186,32 @@ class DocGeneration(models.Model):
         doc_module.apply_manual_defaults()
         doc_module.build_functions_from_menus()
 
-        if self.enrich_from_project and self.project_task_project_id:
-            _logger.info(
-                'action_collect: enriching module=%s with project_id=%s',
-                module_name, self.project_task_project_id,
-            )
+        # Run enrichment after menus/functions are built
+        has_snaps = (
+            (self.snapshot_set_id and self.snapshot_set_id.id)
+            or self.project_task_project_id
+        )
+        if self.enrich_from_project and has_snaps:
             self._run_enrichment(doc_module, overwrite=False)
-        elif self.enrich_from_project and not self.project_task_project_id:
-            _logger.info(
-                'action_collect: enrich_from_project=True but project_task_project_id=0 '
-                '(no project selected) — skipping enrichment for module=%s',
-                module_name,
-            )
 
         return doc_module
 
     def _run_enrichment(self, doc_module, overwrite=False):
         try:
             enricher = self.env['doc.project.enricher']
-            project_id = self.project_task_project_id or False
             _logger.info(
-                '_run_enrichment: module=%s technical_name=%s project_id=%s overwrite=%s',
-                doc_module.name, doc_module.technical_name, project_id, overwrite,
+                '_run_enrichment: module=%s overwrite=%s snapshot_set=%s project_id=%s',
+                doc_module.technical_name, overwrite,
+                self.snapshot_set_id.id if self.snapshot_set_id else None,
+                self.project_task_project_id,
             )
             stats = enricher.enrich_module(
                 doc_module,
                 overwrite=overwrite,
-                project_id=project_id,
+                project_id=self.project_task_project_id or False,
             )
-            _logger.info('_run_enrichment: done, stats=%s', stats)
-        except Exception:  # noqa: BLE001
+            _logger.info('_run_enrichment: done stats=%s', stats)
+        except Exception:
             _logger.warning(
                 '_run_enrichment: failed for %s (non-fatal)',
                 doc_module.technical_name, exc_info=True,
@@ -198,25 +220,40 @@ class DocGeneration(models.Model):
     def action_enrich_from_tasks(self):
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError(_("Сначала выполните «1. Собрать тексты»."))
-        if not self.project_task_project_id:
+            raise UserError(_("Run '1. Collect Texts' first."))
+
+        has_source = (
+            (self.snapshot_set_id and self.snapshot_set_id.id)
+            or self.project_task_project_id
+        )
+        if not has_source:
             raise UserError(_(
-                'Не выбран проект. Укажите проект в поле '
-                '"Проект для обогащения" и повторите.'
+                'No snapshot source configured. Either:\n'
+                '  • Select a Global Snapshot Set, or\n'
+                '  • Enter a project name and click "Re-import from Project".'
             ))
+
+        # Auto-import per-gen snaps if no global set and no existing per-gen snaps
+        if not self.snapshot_set_id and self.project_task_project_id:
+            existing = self.env['doc.project.task.snapshot'].search_count(
+                [('generation_id', '=', self.id)]
+            )
+            if existing == 0:
+                _logger.info(
+                    'action_enrich_from_tasks: no per-gen snaps — auto-importing'
+                )
+                self.env['doc.project.task.snapshot'].import_from_project(
+                    self.id, self.project_task_project_id
+                )
+
         total = {'menus_enriched': 0, 'functions_enriched': 0}
         for doc_module in self.doc_module_ids:
             try:
                 enricher = self.env['doc.project.enricher']
-                _logger.info(
-                    'action_enrich_from_tasks: module=%s technical_name=%s project_id=%s',
-                    doc_module.name, doc_module.technical_name,
-                    self.project_task_project_id,
-                )
                 stats = enricher.enrich_module(
                     doc_module,
                     overwrite=True,
-                    project_id=self.project_task_project_id,
+                    project_id=self.project_task_project_id or False,
                 )
                 total['menus_enriched'] += stats.get('menus_enriched', 0)
                 total['functions_enriched'] += stats.get('functions_enriched', 0)
@@ -224,18 +261,19 @@ class DocGeneration(models.Model):
                     'action_enrich_from_tasks: module=%s stats=%s',
                     doc_module.technical_name, stats,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning(
                     'action_enrich_from_tasks: failed for %s',
                     doc_module.technical_name, exc_info=True,
                 )
+
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Обогащение завершено'),
+                'title': _('Enrichment complete'),
                 'message': _(
-                    'Меню: %s, Функции: %s записей из project.task.'
+                    'Menus: %s, Functions: %s enriched from task snapshots.'
                 ) % (total['menus_enriched'], total['functions_enriched']),
                 'type': 'success',
                 'sticky': False,
@@ -250,7 +288,6 @@ class DocGeneration(models.Model):
             caption = text_composer.compose_menu_caption(
                 node["name"], res_model, node.get("view_modes"), fields_meta
             )
-            # Build key_fields string from required + important fields
             key_fields = self._build_key_fields(fields_meta)
             self.env["doc.menu"].create({
                 "doc_module_id": doc_module.id,
@@ -259,304 +296,63 @@ class DocGeneration(models.Model):
                 "complete_name": node.get("complete_name"),
                 "sequence": node.get("sequence", 10),
                 "odoo_menu_id": node.get("menu_id"),
-                "action_id": node.get("action_id") or 0,
-                "res_model": res_model or False,
-                "view_modes": ",".join(node.get("view_modes") or []),
-                "web_url": node.get("web_url") or False,
+                "action_id": node.get("action_id"),
+                "res_model": res_model,
+                "view_modes": node.get("view_modes"),
+                "web_url": node.get("web_url"),
                 "caption": caption,
-                "caption_source": 'generated',
-                "capture_state": "skipped",
-                "key_fields": key_fields or False,
+                "key_fields": key_fields,
             })
 
-    @staticmethod
-    def _build_key_fields(fields_meta):
-        """Build a newline-separated key_fields string from fields_meta dict.
-
-        Picks required fields first, then fields with a 'help' string,
-        limited to the 10 most relevant. Each line is formatted as:
-          «Field Label» — help text (or just «Field Label» when no help).
-
-        fields_meta is a dict: {field_name: {label, type, required, help, ...}}
-        """
-        if not fields_meta:
-            return ""
-
-        # Skip purely technical / audit fields
-        SKIP_FIELDS = {
-            'id', 'create_uid', 'create_date', 'write_uid', 'write_date',
-            '__last_update', 'display_name', 'active',
-        }
-
-        lines = []
-        # 1st pass — required fields
-        for fname, fmeta in fields_meta.items():
-            if fname in SKIP_FIELDS:
+    def _build_key_fields(self, fields_meta):
+        key_list = []
+        for fname, fmeta in (fields_meta or {}).items():
+            if fmeta.get("required") or fmeta.get("store") is False:
                 continue
-            if not fmeta.get('required'):
-                continue
-            label = fmeta.get('label') or fmeta.get('string') or fname
-            help_text = (fmeta.get('help') or '').strip()
+            label = fmeta.get("string") or fname
+            help_text = fmeta.get("help") or ""
+            entry = label
             if help_text:
-                lines.append('«%s» — %s' % (label, help_text))
-            else:
-                lines.append('«%s»' % label)
-            if len(lines) >= 10:
+                entry = f"{label} — {help_text[:80]}"
+            key_list.append(entry)
+            if len(key_list) >= 10:
                 break
-
-        # 2nd pass — non-required fields that have a help string
-        if len(lines) < 10:
-            for fname, fmeta in fields_meta.items():
-                if fname in SKIP_FIELDS:
-                    continue
-                if fmeta.get('required'):
-                    continue  # already added above
-                help_text = (fmeta.get('help') or '').strip()
-                if not help_text:
-                    continue
-                label = fmeta.get('label') or fmeta.get('string') or fname
-                lines.append('«%s» — %s' % (label, help_text))
-                if len(lines) >= 10:
-                    break
-
-        return '\n'.join(lines)
+        return "\n".join(key_list) if key_list else ""
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
-        for minfo in introspector.get_module_models(module_name):
-            res_model = minfo["model"]
-            fields_meta = introspector.get_fields_meta(res_model)
-            class_doc = self._guess_class_doc(parsed, res_model)
-            field_comments = self._guess_field_comments(parsed, res_model)
-            rows = text_composer.compose_field_table_rows(fields_meta, field_comments)
+        models_meta = introspector.get_models_meta(module_name)
+        source_models = parsed.get("models", {})
+        for model_name, meta in (models_meta or {}).items():
+            doc_str = source_models.get(model_name, {}).get("docstring", "")
             description = text_composer.compose_model_description(
-                res_model, class_doc, {r["name"]: r["help"] for r in rows}
+                meta.get("string", model_name), meta, doc_str
             )
             self.env["doc.model.info"].create({
                 "doc_module_id": doc_module.id,
-                "technical_name": res_model,
-                "display_name": minfo.get("name"),
+                "name": meta.get("string", model_name),
+                "model": model_name,
                 "description": description,
-                "field_table_json": rows,
-                "field_count": len(rows),
             })
 
-    @staticmethod
-    def _guess_class_doc(parsed, res_model):
-        candidate = "".join(p.capitalize() for p in res_model.replace(".", "_").split("_"))
-        classes = (parsed or {}).get("classes", {})
-        if candidate in classes:
-            return classes[candidate]
-        for doc in classes.values():
-            if doc and res_model in doc:
-                return doc
-        return None
-
-    @staticmethod
-    def _guess_field_comments(parsed, res_model):
-        candidate = "".join(p.capitalize() for p in res_model.replace(".", "_").split("_"))
-        prefix = "%s." % candidate
-        out = {}
-        for fkey, comment in (parsed or {}).get("field_comments", {}).items():
-            if fkey.startswith(prefix):
-                out[fkey[len(prefix):]] = comment
-        return out
-
-    # ------------------------------------------------------------------
-    # Markdown rendering
-    # ------------------------------------------------------------------
-    @api.model
-    def _render_markdown(self, doc_module):
-        lines = []
-        title = doc_module.name or doc_module.technical_name
-        lines.append("# Руководство пользователя")
-        lines.append("## %s" % title)
-        if doc_module.system_name:
-            lines.append("> %s" % doc_module.system_name)
-        lines.append("> Версия: %s" % (doc_module.manual_version or "1.0"))
-        if doc_module.developer:
-            lines.append("> Разработчик: %s" % doc_module.developer)
-        if doc_module.city_year:
-            lines.append("> %s" % doc_module.city_year)
-        lines.append("")
-        lines.append("## 1. Введение")
-        if doc_module.intro_user_categories:
-            lines.append("### 1.1 Категории пользователей")
-            for line in doc_module.intro_user_categories.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        if doc_module.intro_scope:
-            lines.append("### 1.2 Область применения")
-            for line in doc_module.intro_scope.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        if doc_module.intro_purpose:
-            lines.append("### 1.3 Назначение документа")
-            lines.append(doc_module.intro_purpose.strip())
-            lines.append("")
-        if doc_module.intro_conventions:
-            lines.append("### 1.4 Соглашения")
-            for line in doc_module.intro_conventions.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        lines.append("## 2. Содержание документа")
-        if doc_module.content_purpose:
-            lines.append("### 2.1 Назначение")
-            lines.append(doc_module.content_purpose.strip())
-            lines.append("")
-        if doc_module.content_materials:
-            lines.append("### 2.2 Материалы")
-            for line in doc_module.content_materials.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        if doc_module.content_preparation:
-            lines.append("### 2.3 Подготовка")
-            for i, line in enumerate(
-                [l for l in doc_module.content_preparation.splitlines() if l.strip()], 1
-            ):
-                lines.append("%d. %s" % (i, line.strip()))
-            lines.append("")
-        lines.append("## 3. Список функций")
-        lines.append("")
-        for func in doc_module.function_ids:
-            lines.append("### Функция %d: %s" % (func.number or 0, func.name or ""))
-            lines.append("")
-            if func.description:
-                lines.append("**Описание:** %s" % func.description.strip())
-                lines.append("")
-            if func.requirements:
-                lines.append("**Требования:** %s" % func.requirements.strip())
-                lines.append("")
-            steps = func.step_lines() if hasattr(func, "step_lines") else []
-            if steps:
-                lines.append("**Порядок выполнения:**")
-                for i, step in enumerate(steps, 1):
-                    lines.append("%d. %s" % (i, step))
-                lines.append("")
-            lines.append("> %s" % (_SCREENSHOT_PLACEHOLDER % (func.name or "")))
-            lines.append("")
-            if func.result:
-                lines.append("**Результат:** %s" % func.result.strip())
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-        if doc_module.model_ids:
-            lines.append("## Приложение. Описание полей")
-            lines.append("")
-            for model in doc_module.model_ids:
-                lines.append("### %s — %s" % (
-                    model.display_name or model.technical_name,
-                    "`%s`" % model.technical_name,
-                ))
-                if model.description:
-                    lines.append(model.description.strip())
-                    lines.append("")
-                rows = model.field_table_json or []
-                if rows:
-                    lines.append("| Поле | Название | Тип | Обязательное | Описание |")
-                    lines.append("|------|-------|-----|-----------|---------|")
-                    for r in rows:
-                        lines.append("| `%s` | %s | %s | %s | %s |" % (
-                            r.get("name", ""),
-                            r.get("label", ""),
-                            r.get("type", ""),
-                            "Да" if r.get("required") else "",
-                            (r.get("help") or "").replace("\n", " ").replace("|", "\\|"),
-                        ))
-                    lines.append("")
-        if doc_module.bibliography:
-            lines.append("## 4. Литература")
-            for line in doc_module.bibliography.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        if doc_module.glossary:
-            lines.append("## 5. Словарь терминов")
-            for line in doc_module.glossary.splitlines():
-                if line.strip():
-                    lines.append("- %s" % line.strip())
-            lines.append("")
-        return "\n".join(lines)
+    def action_capture_screenshots(self):
+        self.ensure_one()
+        capturer = self.env['doc.screenshot.capturer']
+        for doc_module in self.doc_module_ids:
+            capturer.capture_module(doc_module)
+        return True
 
     def action_render_all(self):
         self.ensure_one()
         for doc_module in self.doc_module_ids:
-            doc_module.markdown = self._render_markdown(doc_module)
-        self.state = "done"
+            doc_module.render_markdown()
+        self.state = 'done'
         return True
-
-    def action_capture_screenshots(self):
-        return {
-            "type": "ir.actions.client",
-            "tag": "display_notification",
-            "params": {
-                "title": _("Скриншоты"),
-                "message": _(
-                    "Загрузите скриншоты вручную: "
-                    "откройте модуль → вкладка «Функции» → откройте функцию → поле «Скриншот»."
-                ),
-                "type": "info",
-                "sticky": False,
-            },
-        }
 
     def action_print_pdf(self):
         self.ensure_one()
-        for doc_module in self.doc_module_ids:
-            doc_module.refresh_function_screenshots()
-        return self.env.ref("dpf_docs.action_report_doc_module").report_action(
-            self.doc_module_ids
-        )
+        return self.env.ref('dpf_docs.action_report_doc_generation').report_action(self)
 
     def action_download_word(self):
         self.ensure_one()
-        if not self.doc_module_ids:
-            raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
-        for doc_module in self.doc_module_ids:
-            doc_module.refresh_function_screenshots()
-        data = self.env["doc.word.export"].build_docx(self.doc_module_ids)
-        filename = "%s.docx" % (self.name or "documentation").replace(" ", "_")
-        attachment = self.env["ir.attachment"].create({
-            "name": filename,
-            "type": "binary",
-            "datas": base64.b64encode(data),
-            "res_model": self._name,
-            "res_id": self.id,
-            "mimetype": "application/vnd.openxmlformats-officedocument"
-                        ".wordprocessingml.document",
-        })
-        return {
-            "type": "ir.actions.act_url",
-            "url": "/web/content/%s?download=true" % attachment.id,
-            "target": "self",
-        }
-
-    def get_worker_spec(self):
-        self.ensure_one()
-        modules = []
-        for doc_module in self.doc_module_ids:
-            modules.append({
-                "doc_module_id": doc_module.id,
-                "technical_name": doc_module.technical_name,
-                "tasks": doc_module.pending_screenshot_tasks(),
-            })
-        return {
-            "generation_id": self.id,
-            "use_llm_caption": self.use_llm_caption,
-            "modules": modules,
-        }
-
-    @api.model
-    def _cron_dispatch_pending(self):
-        pending = self.search([("state", "=", "awaiting_shots")])
-        for gen in pending:
-            remaining = sum(len(m.pending_screenshot_tasks()) for m in gen.doc_module_ids)
-            if remaining:
-                _logger.info(
-                    "Generation %s has %s screenshot task(s) awaiting manual upload.",
-                    gen.id, remaining,
-                )
-        return True
+        exporter = self.env['doc.word.export']
+        return exporter.export_generation(self)

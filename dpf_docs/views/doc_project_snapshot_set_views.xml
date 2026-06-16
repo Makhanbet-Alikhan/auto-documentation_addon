@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ================================================================
+         Global Project Snapshot Set — form view
+         ================================================================ -->
+    <record id="view_doc_project_snapshot_set_form" model="ir.ui.view">
+        <field name="name">doc.project.snapshot.set.form</field>
+        <field name="model">doc.project.snapshot.set</field>
+        <field name="arch" type="xml">
+            <form string="Project Snapshot Set">
+                <header>
+                    <button name="action_import"
+                            type="object"
+                            string="⬇ Import / Refresh from Project"
+                            class="btn-primary"
+                            help="Download (or re-download) all tasks from the linked project. Previous snapshots are replaced."/>
+                    <button name="action_view_snapshots"
+                            type="object"
+                            string="Browse Snapshots"
+                            class="btn-secondary"
+                            invisible="task_count == 0"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" placeholder="e.g. ЦПФ Этап 2 — 2026-06"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="project_id"
+                                   help="ID of the project.project record. Use 📂 on a generation form to find the ID."/>
+                            <field name="project_name" readonly="1"
+                                   help="Filled automatically after import."/>
+                        </group>
+                        <group>
+                            <field name="task_count" readonly="1"/>
+                            <field name="last_import_date" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Notes">
+                        <field name="notes" nolabel="1"
+                               placeholder="Optional notes about this snapshot set..."/>
+                    </group>
+                    <group string="Snapshots" invisible="task_count == 0">
+                        <field name="snapshot_ids" nolabel="1" readonly="1">
+                            <list>
+                                <field name="depth"/>
+                                <field name="module_tag"/>
+                                <field name="name"/>
+                                <field name="name_clean"/>
+                                <field name="original_task_id"/>
+                            </list>
+                        </field>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- List view -->
+    <record id="view_doc_project_snapshot_set_list" model="ir.ui.view">
+        <field name="name">doc.project.snapshot.set.list</field>
+        <field name="model">doc.project.snapshot.set</field>
+        <field name="arch" type="xml">
+            <list string="Project Snapshot Sets">
+                <field name="name"/>
+                <field name="project_name"/>
+                <field name="project_id"/>
+                <field name="task_count" string="Snapshots"/>
+                <field name="last_import_date"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Window action -->
+    <record id="action_doc_project_snapshot_set" model="ir.actions.act_window">
+        <field name="name">Project Snapshot Sets</field>
+        <field name="res_model">doc.project.snapshot.set</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No snapshot sets yet.
+            </p>
+            <p>Create a snapshot set for your project, then click
+            <b>Import / Refresh from Project</b> to download all tasks.
+            This set can be reused across multiple documentation runs
+            without re-downloading.</p>
+        </field>
+    </record>
+
+    <!-- Standalone snapshot browser -->
+    <record id="view_doc_project_task_snapshot_list" model="ir.ui.view">
+        <field name="name">doc.project.task.snapshot.list</field>
+        <field name="model">doc.project.task.snapshot</field>
+        <field name="arch" type="xml">
+            <list string="Task Snapshots" default_order="depth,sequence,id">
+                <field name="depth"/>
+                <field name="module_tag"/>
+                <field name="name"/>
+                <field name="name_clean"/>
+                <field name="description_plain"
+                       optional="hide"
+                       string="Description (plain)"/>
+                <field name="original_task_id"/>
+                <field name="snapshot_set_id" optional="hide"/>
+                <field name="generation_id" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_doc_project_task_snapshot_form" model="ir.ui.view">
+        <field name="name">doc.project.task.snapshot.form</field>
+        <field name="model">doc.project.task.snapshot</field>
+        <field name="arch" type="xml">
+            <form string="Task Snapshot" readonly="1">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="name_clean"/>
+                            <field name="module_tag"/>
+                            <field name="depth"/>
+                            <field name="sequence"/>
+                        </group>
+                        <group>
+                            <field name="snapshot_set_id"/>
+                            <field name="generation_id"/>
+                            <field name="original_task_id"/>
+                            <field name="original_project_id"/>
+                            <field name="parent_snapshot_id"/>
+                        </group>
+                    </group>
+                    <group string="Description (plain text)">
+                        <field name="description_plain" nolabel="1"/>
+                    </group>
+                    <group string="Child Snapshots"
+                           invisible="not child_snapshot_ids">
+                        <field name="child_snapshot_ids" nolabel="1">
+                            <list>
+                                <field name="depth"/>
+                                <field name="module_tag"/>
+                                <field name="name"/>
+                            </list>
+                        </field>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+</odoo>
