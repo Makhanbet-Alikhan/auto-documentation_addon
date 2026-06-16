@@ -320,16 +320,27 @@ class DocGeneration(models.Model):
         return "\n".join(key_list) if key_list else ""
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
-        models_meta = introspector.get_models_meta(module_name)
+        """
+        Build doc.model.info records for all models defined by the module.
+
+        Uses introspector.get_module_models() which returns a list of dicts:
+            [{'model': 'dpf.event', 'name': 'Event', 'transient': False}, ...]
+        Then calls get_fields_meta() per model for field-level detail.
+        """
+        module_models = introspector.get_module_models(module_name)
         source_models = parsed.get("models", {})
-        for model_name, meta in (models_meta or {}).items():
+        for entry in (module_models or []):
+            model_name = entry.get("model", "")
+            if not model_name:
+                continue
+            fields_meta = introspector.get_fields_meta(model_name)
             doc_str = source_models.get(model_name, {}).get("docstring", "")
             description = text_composer.compose_model_description(
-                meta.get("string", model_name), meta, doc_str
+                entry.get("name", model_name), fields_meta, doc_str
             )
             self.env["doc.model.info"].create({
                 "doc_module_id": doc_module.id,
-                "name": meta.get("string", model_name),
+                "name": entry.get("name", model_name),
                 "model": model_name,
                 "description": description,
             })

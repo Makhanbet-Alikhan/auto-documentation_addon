@@ -2,19 +2,16 @@
 """
 Mixin that adds snapshot-based project task import to doc.generation.
 
-New behaviour added to doc.generation via _inherit
---------------------------------------------------
-1.  action_collect() now imports snapshots BEFORE running per-module enrichment,
-    so the enricher always reads from snapshots rather than live project.task.
+Added to doc.generation via _inherit:
+  1. action_reimport_project_tasks() — button to manually re-download tasks
+     into per-generation snapshots.
+  2. action_enrich_from_tasks() override — ensures snapshots are loaded before
+     enrichment runs.
+  3. project_snapshot_count — info counter on the form.
 
-2.  action_enrich_from_tasks() auto-imports snapshots if none exist yet,
-    so the user does not need to click two separate buttons.
-
-3.  action_reimport_project_tasks() — a dedicated button that (re)downloads all
-    project tasks into snapshots without running full generation.  Safe to call
-    multiple times; always wipes and re-imports.
-
-4.  project_snapshot_count — computed informational counter shown on the form.
+NOTE: action_collect() is NOT overridden here. The base class
+doc_generation.py already handles snapshot pre-import inside action_collect().
+Overriding it here would cause double-import.
 """
 import logging
 
@@ -48,9 +45,8 @@ class DocGenerationProjectMixin(models.Model):
 
     def action_reimport_project_tasks(self):
         """
-        Button: (re)import all tasks from the selected project into snapshots.
-
-        Deletes previous snapshots for this generation first, then re-imports.
+        Button: (re)import all tasks from the selected project into per-generation
+        snapshots.  Deletes previous snapshots for this generation first.
         Safe to call multiple times.
         """
         self.ensure_one()
@@ -86,67 +82,21 @@ class DocGenerationProjectMixin(models.Model):
 
     def _ensure_snapshots_loaded(self):
         """
-        Make sure snapshots are populated for this generation.
+        Ensure per-generation snapshots are populated.
 
-        If none exist yet and a project_id is configured, imports them
-        automatically.  Idempotent when snapshots already exist.
+        Called before enrichment if no global snapshot_set_id is set.
+        If snapshots already exist they are NOT re-imported (idempotent).
         """
         self.ensure_one()
+        if self.snapshot_set_id:
+            # Global set is configured — no per-gen import needed.
+            return
         Snapshot = self.env['doc.project.task.snapshot']
         existing = Snapshot.search_count([('generation_id', '=', self.id)])
         if existing == 0 and self.project_task_project_id:
             _logger.info(
-                '_ensure_snapshots_loaded: no snapshots for gen=%s — '
-                'importing now from project_id=%s',
+                '_ensure_snapshots_loaded: no per-gen snaps for gen=%s — '
+                'importing from project_id=%s',
                 self.id, self.project_task_project_id,
             )
             self._do_import_project_tasks()
-
-    # ------------------------------------------------------------------
-    # Override action_collect
-    # ------------------------------------------------------------------
-
-    def action_collect(self):
-        """
-        Override: import project task snapshots BEFORE collecting module texts.
-
-        Ensures that enrichment during collection already has snapshot data
-        available, even on the very first run.
-        """
-        self.ensure_one()
-
-        if self.enrich_from_project and self.project_task_project_id:
-            _logger.info(
-                'action_collect: pre-importing project tasks for generation_id=%s',
-                self.id,
-            )
-            self._do_import_project_tasks()
-        elif self.enrich_from_project and not self.project_task_project_id:
-            _logger.info(
-                'action_collect: enrich_from_project=True but no project selected '
-                '— skipping snapshot import'
-            )
-
-        return super().action_collect()
-
-    # ------------------------------------------------------------------
-    # Override action_enrich_from_tasks
-    # ------------------------------------------------------------------
-
-    def action_enrich_from_tasks(self):
-        """
-        Override: ensure snapshots are populated before running enrichment.
-
-        If the user clicks 'Enrich from Tasks' without having imported
-        snapshots first, they are auto-imported here.
-        """
-        self.ensure_one()
-        if not self.doc_module_ids:
-            raise UserError(_('Run "1. Collect Texts" first.'))
-        if not self.project_task_project_id:
-            raise UserError(_(
-                'No project selected. Set the "Project for enrichment" field and retry.'
-            ))
-
-        self._ensure_snapshots_loaded()
-        return super().action_enrich_from_tasks()
