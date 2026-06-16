@@ -16,20 +16,20 @@ class DocProjectPickerWizard(models.TransientModel):
 
     generation_id = fields.Many2one(
         'doc.generation',
-        string='\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430\u0446\u0438\u044f',
+        string='Generation Run',
         required=True,
         ondelete='cascade',
     )
-    # Plain Char — user types or selects project name.
+    # Plain Char \u2014 user types or selects project name.
     # Resolved to integer ID in action_confirm() via env lookup.
     project_name = fields.Char(
-        string='\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0435\u043a\u0442\u0430',
+        string='Project Name',
         required=True,
     )
     # Available project names for the selection widget (computed, not stored)
     project_name_selection = fields.Selection(
         selection='_get_project_selection',
-        string='\u0412\u044b\u0431\u0440\u0430\u0442\u044c \u043f\u0440\u043e\u0435\u043a\u0442',
+        string='Select Project',
     )
 
     @api.model
@@ -44,29 +44,42 @@ class DocProjectPickerWizard(models.TransientModel):
 
     @api.onchange('project_name_selection')
     def _onchange_project_name_selection(self):
+        """Copy the dropdown selection into the text field."""
         if self.project_name_selection:
             self.project_name = self.project_name_selection
 
     def action_confirm(self):
+        """Resolve project name to ID, write to doc.generation, reload parent form."""
         self.ensure_one()
         gen = self.generation_id
         if not gen:
-            raise UserError(_('\u0421\u0432\u044f\u0437\u044c \u0441 \u0437\u0430\u043f\u0438\u0441\u044c\u044e \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430\u0446\u0438\u0438 \u043f\u043e\u0442\u0435\u0440\u044f\u043d\u0430.'))
+            raise UserError(_('Generation record link lost.'))
         name = (self.project_name or '').strip()
         if not name:
-            raise UserError(_('\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0435\u043a\u0442\u0430.'))
+            raise UserError(_('Enter a project name.'))
         if 'project.project' not in self.env:
-            raise UserError(_('\u041c\u043e\u0434\u0443\u043b\u044c project \u043d\u0435 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d.'))
+            raise UserError(_('The project module is not installed.'))
         project = self.env['project.project'].sudo().search(
             [('name', 'ilike', name)], limit=1
         )
         if not project:
-            raise UserError(_('\u041f\u0440\u043e\u0435\u043a\u0442 \u00ab%s\u00bb \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.') % name)
+            raise UserError(_('Project \u00ab%s\u00bb not found.') % name)
+
+        # Write project ID + name back to the generation record.
         gen.write({
             'project_task_project_id': project.id,
             'project_task_project_name': project.name,
         })
-        return {'type': 'ir.actions.act_window_close'}
+
+        # Return reload action so the parent form reflects the new values
+        # immediately without requiring a manual page refresh.
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'doc.generation',
+            'res_id': gen.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
 
     def action_cancel(self):
         return {'type': 'ir.actions.act_window_close'}

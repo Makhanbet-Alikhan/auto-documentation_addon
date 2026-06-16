@@ -30,18 +30,37 @@ def compose_module_description(manifest, main_model_doc):
     return "\n\n".join(parts)
 
 
-def compose_model_description(model_name, class_doc, field_comments):
-    """Build a model paragraph from its docstring and per-field comments."""
+def compose_model_description(model_name, fields_meta, class_doc):
+    """Build a model paragraph from its docstring and per-field metadata.
+
+    Parameter order matches the call in doc_generation._build_models:
+        compose_model_description(name, fields_meta, doc_str)
+
+    :param model_name:  Technical model name, e.g. 'dpf.event'.
+    :param fields_meta: Dict returned by introspector.get_fields_meta().
+                        May be None or empty.
+    :param class_doc:   Docstring extracted from the Python source, or None.
+                        Must be a str (or falsy) — never a dict.
+    """
     lines = []
-    if class_doc:
+
+    # class_doc is expected to be a str from source_parser; guard defensively.
+    if class_doc and isinstance(class_doc, str):
         lines.append(class_doc.strip())
     else:
         lines.append("Model %s." % model_name)
-    if field_comments:
-        annotated = [c for c in field_comments.values() if c]
+
+    if fields_meta and isinstance(fields_meta, dict):
+        annotated = [
+            meta.get("help", "")
+            for meta in fields_meta.values()
+            if isinstance(meta, dict) and meta.get("help")
+        ]
         if annotated:
-            lines.append("This model documents %d annotated field(s)."
-                         % len(annotated))
+            lines.append(
+                "This model documents %d annotated field(s)." % len(annotated)
+            )
+
     return "\n\n".join(lines)
 
 
@@ -54,10 +73,11 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta):
          Key fields: Name, Email, Phone."
     """
     modes = ", ".join(view_modes) if view_modes else "default"
-    sentence = ("Screen '%s' shows the model %s in %s view."
-                % (menu_name, res_model, modes))
+    sentence = (
+        "Screen '%s' shows the model %s in %s view."
+        % (menu_name, res_model, modes)
+    )
 
-    # Pick a handful of representative fields for a readable summary.
     labels = []
     for fname, meta in (fields_meta or {}).items():
         if fname.startswith("_") or fname in ("id", "display_name"):
