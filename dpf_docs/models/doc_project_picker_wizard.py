@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Wizard: lets the user pick a project and writes it back to doc.generation.
+"""
+Wizard: lets the user pick a project and writes it back to doc.generation.
 
-We cannot use fields.Many2one('project.project') directly because that
-causes an AssertionError at registry setup time when the 'project' module
-is not installed.  Instead we store the project name as a plain Char and
-resolve it to an ID in action_confirm().
+Design notes
+------------
+- We cannot use fields.Many2one('project.project') directly because that
+  causes an AssertionError at registry setup time when the 'project' module
+  is not installed.  Instead we store the resolved integer project ID in a
+  plain Integer field and populate the dropdown via a Selection whose values
+  are stringified project IDs.
 
-After confirming, the wizard writes the project ID + name to doc.generation
-and triggers a full page reload of the parent form via 'reload' client action.
+- After confirming, the wizard writes project_task_project_id +
+  project_task_project_name to doc.generation and reopens the same
+  doc.generation record via act_window.  This is the reliable pattern for
+  Odoo 19 dialogs that need to refresh the parent form: returning tag='reload'
+  from inside a dialog does NOT reliably reload the parent view.
 """
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
@@ -15,7 +22,7 @@ from odoo.exceptions import UserError
 
 class DocProjectPickerWizard(models.TransientModel):
     _name = 'doc.project.picker.wizard'
-    _description = 'Auto Doc — Project Picker'
+    _description = 'Auto Doc - Project Picker Wizard'
 
     generation_id = fields.Many2one(
         'doc.generation',
@@ -23,66 +30,104 @@ class DocProjectPickerWizard(models.TransientModel):
         required=True,
         ondelete='cascade',
     )
-    # Plain Char — user types or selects project name.
-    # Resolved to integer ID in action_confirm() via env lookup.
-    project_name = fields.Char(
-        string='Project Name',
+
+    # Stores the chosen project as a string-encoded integer ID
+    # (Selection values must be strings in Odoo).
+    project_selection = fields.Selection(
+        selection='_get_project_selection',
+        string='Project',
         required=True,
     )
-    # Available project names for the selection widget (computed, not stored)
-    project_name_selection = fields.Selection(
-        selection='_get_project_selection',
-        string='Select Project',
+
+    # Human-readable label kept in sync with project_selection (display only)
+    project_display_name = fields.Char(
+        string='Selected project',
+        readonly=True,
+        store=False,
+        compute='_compute_project_display_name',
     )
+
+    # ------------------------------------------------------------------ #
+    # Selection source                                                     #
+    # ------------------------------------------------------------------ #
 
     @api.model
     def _get_project_selection(self):
-        """Return list of (name, name) tuples for all projects."""
+        """
+        Return [(str(project.id), project.name), ...] for all projects.
+
+        Using the project ID as the stored value avoids name-resolution
+        problems entirely (duplicate names, ilike ambiguity, etc.).
+        """
         if 'project.project' not in self.env:
             return []
         projects = self.env['project.project'].sudo().search(
-            [], order='name asc', limit=200
+            [], order='name asc', limit=500
         )
-        return [(p.name, p.name) for p in projects]
+        return [(str(p.id), p.name) for p in projects]
 
-    @api.onchange('project_name_selection')
-    def _onchange_project_name_selection(self):
-        """Copy the dropdown selection into the text field."""
-        if self.project_name_selection:
-            self.project_name = self.project_name_selection
+    @api.depends('project_selection')
+    def _compute_project_display_name(self):
+        for rec in self:
+            if rec.project_selection and 'project.project' in self.env:
+                try:
+                    pid = int(rec.project_selection)
+                    proj = self.env['project.project'].sudo().browse(pid)
+                    rec.project_display_name = proj.name if proj.exists() else rec.project_selection
+                except (ValueError, TypeError):
+                    rec.project_display_name = rec.project_selection
+            else:
+                rec.project_display_name = ''
+
+    # ------------------------------------------------------------------ #
+    # Actions                                                              #
+    # ------------------------------------------------------------------ #
 
     def action_confirm(self):
-        """Resolve project name to ID, write to doc.generation, reload parent.
+        """
+        Write the selected project to doc.generation and reopen that record.
 
-        The wizard opens as target='new' (a dialog).  To force the parent form
-        to show the updated project_task_project_name / project_task_project_id
-        we return ir.actions.client tag='reload' which triggers a full page
-        reload — the cleanest approach for dialogs that mutate parent records.
+        Returning an ir.actions.act_window that targets the same record causes
+        Odoo to close the dialog and navigate to (or refresh) the generation
+        form — reliably showing the newly saved project name.  This is
+        preferable to tag='reload' which reloads the whole browser page and
+        loses the user's scroll position / unsaved state on unrelated fields.
         """
         self.ensure_one()
         gen = self.generation_id
         if not gen:
             raise UserError(_('Generation record link lost.'))
-        name = (self.project_name or '').strip()
-        if not name:
-            raise UserError(_('Enter a project name.'))
-        if 'project.project' not in self.env:
-            raise UserError(_('The project module is not installed.'))
-        project = self.env['project.project'].sudo().search(
-            [('name', 'ilike', name)], limit=1
-        )
-        if not project:
-            raise UserError(_('Project «%s» not found.') % name)
 
-        # Persist the selection on the generation record.
+        if not self.project_selection:
+            raise UserError(_('Please select a project from the list.'))
+
+        if 'project.project' not in self.env:
+            raise UserError(_('The Project module is not installed.'))
+
+        try:
+            project_id = int(self.project_selection)
+        except (ValueError, TypeError):
+            raise UserError(_('Invalid project selection value: %s') % self.project_selection)
+
+        project = self.env['project.project'].sudo().browse(project_id)
+        if not project.exists():
+            raise UserError(_('The selected project no longer exists (id=%s).') % project_id)
+
         gen.write({
             'project_task_project_id': project.id,
             'project_task_project_name': project.name,
         })
 
-        # Reload the whole page so the parent form shows the new values.
-        # This is the correct pattern when a dialog mutates its parent record.
-        return {'type': 'ir.actions.client', 'tag': 'reload'}
+        # Reopen the parent doc.generation record — closes the dialog and
+        # refreshes the form with the newly saved project values.
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'doc.generation',
+            'res_id': gen.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
 
     def action_cancel(self):
+        """Close the dialog without saving."""
         return {'type': 'ir.actions.act_window_close'}

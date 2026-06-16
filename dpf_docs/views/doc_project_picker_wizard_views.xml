@@ -5,22 +5,28 @@
         <field name="name">doc.project.picker.wizard.form</field>
         <field name="model">doc.project.picker.wizard</field>
         <field name="arch" type="xml">
-            <form string="Выберите проект">
+            <form string="Select Project">
                 <group>
                     <field name="generation_id" invisible="1"/>
-                    <field name="project_name_selection"
-                           string="Выбрать из списка"
-                           help="Выберите проект из выпадающего списка"/>
-                    <field name="project_name"
-                           string="Название проекта"
-                           placeholder="Или введите название вручную..."
-                           help="Название будет резолвировано в ID проекта через ilike-поиск"/>
+                    <field name="project_selection"
+                           string="Project"
+                           widget="selection"
+                           help="Select a project to import tasks from"/>
+                    <field name="project_display_name"
+                           string="Selected"
+                           invisible="not project_selection"/>
                 </group>
                 <footer>
-                    <button name="action_confirm" type="object"
-                            string="Выбрать" class="btn-primary"/>
-                    <button name="action_cancel" type="object"
-                            string="Отмена" class="btn-secondary"/>
+                    <button name="action_confirm"
+                            type="object"
+                            string="Confirm"
+                            class="btn-primary"
+                            data-hotkey="q"/>
+                    <button name="action_cancel"
+                            type="object"
+                            string="Cancel"
+                            class="btn-secondary"
+                            special="cancel"/>
                 </footer>
             </form>
         </field>
