@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     "name": "DPF Docs - Module Documentation Generator",
-    "version": "19.0.1.2.0",
+    "version": "19.0.1.3.0",
     "category": "Tools/Documentation",
     "summary": "Automatically generate module documentation: description, "
                "menu tree, per-menu screenshots and field tables.",
@@ -38,6 +38,7 @@ all documentation generation runs.  See Tools > Documentation > Project Snapshot
         "views/doc_project_snapshot_set_views.xml",
         "views/doc_menu_items.xml",
     ],
+    "post_migrate": "dpf_docs.hooks.post_migrate",
     "installable": True,
     "application": True,
     "license": "LGPL-3",
