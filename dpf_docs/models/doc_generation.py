@@ -52,9 +52,6 @@ class DocGeneration(models.Model):
         ),
     )
 
-    # Count of per-generation task snapshots (displayed in the form).
-    # Non-stored compute: no @api.depends — Odoo 19 forbids depends('id').
-    # Recomputed on every read, which is fine for a count badge.
     project_snapshot_count = fields.Integer(
         string="Per-run Snapshots",
         compute="_compute_project_snapshot_count",
@@ -85,7 +82,7 @@ class DocGeneration(models.Model):
     # Computed fields
     # ------------------------------------------------------------------
     def _compute_project_snapshot_count(self):
-        """Count per-generation task snapshots. No @api.depends — non-stored."""
+        """Count per-generation task snapshots."""
         Snapshot = self.env['doc.project.task.snapshot']
         for rec in self:
             rec.project_snapshot_count = Snapshot.search_count(
@@ -100,9 +97,10 @@ class DocGeneration(models.Model):
         self.ensure_one()
         if 'project.project' not in self.env:
             raise UserError(_("The 'project' module is not installed."))
+        # Only pass generation_id — project_name field no longer exists
+        # on the wizard after the picker rewrite.
         wizard = self.env['doc.project.picker.wizard'].create({
             'generation_id': self.id,
-            'project_name': self.project_task_project_name or '',
         })
         return {
             'name': _('Select Project'),
@@ -118,7 +116,7 @@ class DocGeneration(models.Model):
         self.ensure_one()
         if not self.project_task_project_id:
             raise UserError(_(
-                'No project selected. Enter a project name and click the 📂 button to pick one first.'
+                'No project selected. Use the 📂 button to pick a project first.'
             ))
         result = self.env['doc.project.task.snapshot'].import_from_project(
             self.id, self.project_task_project_id
@@ -167,20 +165,14 @@ class DocGeneration(models.Model):
         if not modules:
             raise UserError(_("Select at least one module to document."))
 
-        # Pre-import per-generation snapshots if no global set is selected
         if self.enrich_from_project and not self.snapshot_set_id:
             if self.project_task_project_id:
                 _logger.info(
-                    'action_collect: no snapshot_set — importing per-gen snaps '
-                    'for project_id=%s', self.project_task_project_id
+                    'action_collect: importing per-gen snaps for project_id=%s',
+                    self.project_task_project_id
                 )
                 self.env['doc.project.task.snapshot'].import_from_project(
                     self.id, self.project_task_project_id
-                )
-            else:
-                _logger.info(
-                    'action_collect: enrich_from_project=True but no project '
-                    'and no snapshot_set — skipping snapshot import'
                 )
 
         introspector = self.env["doc.introspector"]
@@ -222,7 +214,6 @@ class DocGeneration(models.Model):
         doc_module.apply_manual_defaults()
         doc_module.build_functions_from_menus()
 
-        # Run enrichment after menus/functions are built
         has_snaps = (
             (self.snapshot_set_id and self.snapshot_set_id.id)
             or self.project_task_project_id
@@ -235,18 +226,12 @@ class DocGeneration(models.Model):
     def _run_enrichment(self, doc_module, overwrite=False):
         try:
             enricher = self.env['doc.project.enricher']
-            _logger.info(
-                '_run_enrichment: module=%s overwrite=%s snapshot_set=%s project_id=%s',
-                doc_module.technical_name, overwrite,
-                self.snapshot_set_id.id if self.snapshot_set_id else None,
-                self.project_task_project_id,
-            )
             stats = enricher.enrich_module(
                 doc_module,
                 overwrite=overwrite,
                 project_id=self.project_task_project_id or False,
             )
-            _logger.info('_run_enrichment: done stats=%s', stats)
+            _logger.info('_run_enrichment: module=%s stats=%s', doc_module.technical_name, stats)
         except Exception:
             _logger.warning(
                 '_run_enrichment: failed for %s (non-fatal)',
@@ -266,18 +251,14 @@ class DocGeneration(models.Model):
             raise UserError(_(
                 'No snapshot source configured. Either:\n'
                 '  \u2022 Select a Global Snapshot Set, or\n'
-                '  \u2022 Enter a project name and click "Re-import from Project".'
+                '  \u2022 Pick a project and click "Re-import from Project".'
             ))
 
-        # Auto-import per-gen snaps if no global set and no existing per-gen snaps
         if not self.snapshot_set_id and self.project_task_project_id:
             existing = self.env['doc.project.task.snapshot'].search_count(
                 [('generation_id', '=', self.id)]
             )
             if existing == 0:
-                _logger.info(
-                    'action_enrich_from_tasks: no per-gen snaps — auto-importing'
-                )
                 self.env['doc.project.task.snapshot'].import_from_project(
                     self.id, self.project_task_project_id
                 )
@@ -293,10 +274,6 @@ class DocGeneration(models.Model):
                 )
                 total['menus_enriched'] += stats.get('menus_enriched', 0)
                 total['functions_enriched'] += stats.get('functions_enriched', 0)
-                _logger.info(
-                    'action_enrich_from_tasks: module=%s stats=%s',
-                    doc_module.technical_name, stats,
-                )
             except Exception:
                 _logger.warning(
                     'action_enrich_from_tasks: failed for %s',
@@ -356,17 +333,6 @@ class DocGeneration(models.Model):
         return "\n".join(key_list) if key_list else ""
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
-        """
-        Build doc.model.info records for all models defined by the module.
-
-        doc.model.info fields:
-            doc_module_id   Many2one  (required)
-            technical_name  Char      (required) — ORM model name e.g. 'dpf.event'
-            display_name    Char      — human-readable label e.g. 'Event'
-            description     Text
-            field_table_json Json
-            field_count     Integer
-        """
         module_models = introspector.get_module_models(module_name)
         source_models = parsed.get("models", {})
         for entry in (module_models or []):
@@ -380,8 +346,8 @@ class DocGeneration(models.Model):
             )
             self.env["doc.model.info"].create({
                 "doc_module_id": doc_module.id,
-                "technical_name": model_name,                      # was: 'model'
-                "display_name": entry.get("name", model_name),    # was: 'name'
+                "technical_name": model_name,
+                "display_name": entry.get("name", model_name),
                 "description": description,
                 "field_count": len(fields_meta) if fields_meta else 0,
             })
