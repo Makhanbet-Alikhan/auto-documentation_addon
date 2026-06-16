@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Generation orchestrator."""
-import base64
 import logging
 
 from odoo import _, api, fields, models
@@ -9,10 +8,6 @@ from odoo.exceptions import UserError
 from ..services import text_composer
 
 _logger = logging.getLogger(__name__)
-
-_SCREENSHOT_PLACEHOLDER = (
-    "\U0001f4cc [\u0417\u0434\u0435\u0441\u044c \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u044d\u043a\u0440\u0430\u043d\u0430 \u00ab%s\u00bb]"
-)
 
 
 class DocGeneration(models.Model):
@@ -34,7 +29,7 @@ class DocGeneration(models.Model):
         help="Optional. Comma-separated technical names.",
     )
 
-    # Soft dependency on project.project \u2014 no hard FK.
+    # Soft dependency on project.project — no hard FK.
     project_task_project_id = fields.Integer(
         string="Project ID",
         default=0,
@@ -55,6 +50,13 @@ class DocGeneration(models.Model):
             'Project Snapshots). When set, enrichment reads from the global '
             'set instead of downloading tasks again for each run.'
         ),
+    )
+
+    # Count of per-generation task snapshots (displayed in the form)
+    project_snapshot_count = fields.Integer(
+        string="Per-run Snapshots",
+        compute="_compute_project_snapshot_count",
+        store=False,
     )
 
     state = fields.Selection(
@@ -78,6 +80,16 @@ class DocGeneration(models.Model):
     )
 
     # ------------------------------------------------------------------
+    # Computed fields
+    # ------------------------------------------------------------------
+    @api.depends('id')
+    def _compute_project_snapshot_count(self):
+        for rec in self:
+            rec.project_snapshot_count = self.env['doc.project.task.snapshot'].search_count(
+                [('generation_id', '=', rec.id)]
+            )
+
+    # ------------------------------------------------------------------
     # Project picker wizard button
     # ------------------------------------------------------------------
     def action_pick_project(self):
@@ -96,6 +108,27 @@ class DocGeneration(models.Model):
             'res_id': wizard.id,
             'view_mode': 'form',
             'target': 'new',
+        }
+
+    def action_reimport_project_tasks(self):
+        """Re-download tasks from project.project into per-generation snapshots."""
+        self.ensure_one()
+        if not self.project_task_project_id:
+            raise UserError(_(
+                'No project selected. Enter a project name and click the 📂 button to pick one first.'
+            ))
+        result = self.env['doc.project.task.snapshot'].import_from_project(
+            self.id, self.project_task_project_id
+        )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Import complete'),
+                'message': _('%s task snapshots imported from project.') % result.get('imported', 0),
+                'type': 'success',
+                'sticky': False,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -135,7 +168,7 @@ class DocGeneration(models.Model):
         if self.enrich_from_project and not self.snapshot_set_id:
             if self.project_task_project_id:
                 _logger.info(
-                    'action_collect: no snapshot_set \u2014 importing per-gen snaps '
+                    'action_collect: no snapshot_set — importing per-gen snaps '
                     'for project_id=%s', self.project_task_project_id
                 )
                 self.env['doc.project.task.snapshot'].import_from_project(
@@ -144,7 +177,7 @@ class DocGeneration(models.Model):
             else:
                 _logger.info(
                     'action_collect: enrich_from_project=True but no project '
-                    'and no snapshot_set \u2014 skipping snapshot import'
+                    'and no snapshot_set — skipping snapshot import'
                 )
 
         introspector = self.env["doc.introspector"]
@@ -240,7 +273,7 @@ class DocGeneration(models.Model):
             )
             if existing == 0:
                 _logger.info(
-                    'action_enrich_from_tasks: no per-gen snaps \u2014 auto-importing'
+                    'action_enrich_from_tasks: no per-gen snaps — auto-importing'
                 )
                 self.env['doc.project.task.snapshot'].import_from_project(
                     self.id, self.project_task_project_id
@@ -350,10 +383,6 @@ class DocGeneration(models.Model):
         capturer = self.env['doc.screenshot.capturer']
         capturer.capture_all(self)
         return True
-
-    def action_print_report(self):
-        self.ensure_one()
-        return self.env.ref('dpf_docs.action_report_doc_generation').report_action(self)
 
     def action_download_word(self):
         self.ensure_one()

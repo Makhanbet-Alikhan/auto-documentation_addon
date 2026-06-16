@@ -10,19 +10,13 @@
                     <button name="action_collect" type="object"
                             string="1. Collect Texts" class="btn-primary"
                             invisible="state not in ('draft',)"/>
-                    <button name="action_enrich_from_tasks" type="object"
-                            string="4. Enrich from Tasks"
-                            invisible="state in ('draft',)"
-                            help="Re-run task enrichment on all collected modules."/>
                     <button name="action_capture_screenshots" type="object"
                             string="2. Capture Screenshots" class="btn-primary"
                             invisible="state not in ('awaiting_shots',)"/>
-                    <button name="action_render_all" type="object"
-                            string="3. Render Markdown"
-                            invisible="state not in ('awaiting_shots',)"/>
-                    <button name="action_print_pdf" type="object"
-                            string="Print PDF"
-                            invisible="state in ('draft',)"/>
+                    <button name="action_enrich_from_tasks" type="object"
+                            string="3. Enrich from Tasks"
+                            invisible="state in ('draft',)"
+                            help="Re-run task enrichment on all collected modules."/>
                     <button name="action_download_word" type="object"
                             string="Download Word"
                             invisible="state in ('draft',)"/>
@@ -47,24 +41,11 @@
                     <group string="Task Enrichment Source"
                            invisible="not enrich_from_project">
                         <group>
-                            <!--
-                              OPTION A — Global Snapshot Set (preferred).
-                              User picks a pre-downloaded set from the global pool.
-                              One download shared across all generation runs.
-                            -->
                             <field name="snapshot_set_id"
                                    options="{'no_create': True}"
                                    help="Pick a pre-downloaded global snapshot set. Faster — no re-download needed for each run."/>
                         </group>
                         <group>
-                            <!--
-                              OPTION B — Per-generation download (legacy fallback).
-                              User enters project name and clicks Re-import.
-                              NOTE: the Re-import button has NO invisible guard on
-                              project_task_project_id — Integer defaults to 0 which
-                              is falsy, hiding the button forever on new records.
-                              Python raises UserError when no project is configured.
-                            -->
                             <label for="project_task_project_name"
                                    string="— or — Project Name (per-run)"/>
                             <div class="o_field_widget">
@@ -79,7 +60,7 @@
                                 </div>
                                 <small class="text-muted"
                                        invisible="not project_task_project_id">
-                                    ID: <field name="project_task_project_id"
+                                    ID: <field name="project_task_project_id"
                                               nolabel="1" readonly="1"
                                               style="display:inline;width:auto;"/>
                                 </small>
@@ -90,7 +71,7 @@
                                     type="object"
                                     string="⬇ Re-import from Project"
                                     class="btn btn-secondary"
-                                    help="Download tasks into a per-run snapshot. Use the Global Snapshot Set above to avoid re-downloading."/>
+                                    help="Download tasks into a per-run snapshot."/>
                             <span invisible="not project_task_project_id">
                                 <field name="project_snapshot_count"
                                        nolabel="1" readonly="1"/>
@@ -125,9 +106,8 @@
                             <div class="alert alert-info" role="alert">
                                 <p><b>Step 1</b> — Collect Texts: collects menus, models and functions.</p>
                                 <p><b>Step 2</b> — Capture Screenshots: upload or auto-capture.</p>
-                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.</p>
-                                <p><b>Step 4 — Enrich from Tasks</b>: reads task snapshots and
-                                creates doc.function records. Run any time after editing tasks.</p>
+                                <p><b>Step 3</b> — Enrich from Tasks: reads task snapshots and creates doc.function records.</p>
+                                <p><b>Step 4</b> — Download Word: export final documentation.</p>
                                 <hr/>
                                 <p><b>Expected task structure in the project:</b></p>
                                 <pre style="background:#f8f8f8;padding:8px;border-radius:4px;font-size:12px;">Project (e.g. «ЦПФ Этап 2»)
