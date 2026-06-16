@@ -11,3 +11,5 @@ access_doc_model_info_manager,doc.model.info.manager,model_doc_model_info,group_
 access_doc_function_manager,doc.function.manager,model_doc_function,group_doc_manager,1,1,1,1
 access_doc_project_picker_wizard_user,doc.project.picker.wizard.user,model_doc_project_picker_wizard,group_doc_user,1,1,1,1
 access_doc_project_picker_wizard_manager,doc.project.picker.wizard.manager,model_doc_project_picker_wizard,group_doc_manager,1,1,1,1
+access_doc_project_task_snapshot_user,doc.project.task.snapshot.user,model_doc_project_task_snapshot,group_doc_user,1,1,1,1
+access_doc_project_task_snapshot_manager,doc.project.task.snapshot.manager,model_doc_project_task_snapshot,group_doc_manager,1,1,1,1
