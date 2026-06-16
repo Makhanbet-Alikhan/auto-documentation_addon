@@ -1,33 +1,66 @@
 # -*- coding: utf-8 -*-
-"""
-doc_generation.py — core generation orchestrator.
-
-Responsible for:
-  1. Collecting texts (menus, models, functions) from installed modules.
-  2. Running optional enrichment from project task snapshots.
-  3. Triggering screenshot capture.
-  4. Exporting the final Word document.
-"""
+"""Generation orchestrator."""
+import base64
 import logging
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
-from . import text_composer
+from ..services import text_composer
 
 _logger = logging.getLogger(__name__)
+
+_SCREENSHOT_PLACEHOLDER = (
+    "\U0001f4cc [\u0417\u0434\u0435\u0441\u044c \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u044d\u043a\u0440\u0430\u043d\u0430 \u00ab%s\u00bb]"
+)
 
 
 class DocGeneration(models.Model):
     _name = "doc.generation"
-    _description = "Auto Doc - Documentation Generation Run"
-    _order = "id desc"
-    _inherit = ["mail.thread", "mail.activity.mixin"]
+    _description = "Auto Doc - Generation Run"
+    _inherit = ["mail.thread"]
+    _order = "create_date desc"
 
-    name = fields.Char(string="Name", required=True, default="New Documentation")
+    name = fields.Char(
+        string="Name", required=True, default=lambda self: _("New Run")
+    )
+    module_ids = fields.Many2many(
+        "ir.module.module",
+        string="Installed Modules",
+        domain="[('state', '=', 'installed')]",
+    )
+    module_names = fields.Char(
+        string="Additional Modules",
+        help="Optional. Comma-separated technical names.",
+    )
+
+    # Soft dependency on project.project \u2014 no hard FK.
+    project_task_project_id = fields.Integer(
+        string="Project ID",
+        default=0,
+        help="Internal: stores project.project id without a hard FK.",
+    )
+    project_task_project_name = fields.Char(
+        string="Project Name",
+        help="Name of the selected project (resolved to project_task_project_id).",
+    )
+
+    # Global snapshot set (preferred over per-generation import)
+    snapshot_set_id = fields.Many2one(
+        'doc.project.snapshot.set',
+        string='Global Snapshot Set',
+        ondelete='set null',
+        help=(
+            'Select a pre-downloaded snapshot set (Tools > Documentation > '
+            'Project Snapshots). When set, enrichment reads from the global '
+            'set instead of downloading tasks again for each run.'
+        ),
+    )
+
     state = fields.Selection(
         [
             ("draft", "Draft"),
+            ("collected", "Texts Collected"),
             ("awaiting_shots", "Awaiting Screenshots"),
             ("done", "Done"),
         ],
@@ -35,48 +68,85 @@ class DocGeneration(models.Model):
         default="draft",
         tracking=True,
     )
-
-    module_names = fields.Char(
-        string="Modules",
-        help="Comma-separated technical module names, e.g. dpf_events,dpf_portal",
-    )
     doc_module_ids = fields.One2many(
         "doc.module", "generation_id", string="Documented Modules"
     )
-
-    # ---------- project enrichment ----------
+    use_llm_caption = fields.Boolean(string="Use LLM Captions")
     enrich_from_project = fields.Boolean(
         string="Enrich from Project Tasks",
-        default=False,
-        help="If enabled, menu/function descriptions are enriched from project task snapshots.",
-    )
-    project_task_project_id = fields.Integer(
-        string="Project ID",
-        default=0,
-        help="ID of the project.project record to import tasks from.",
-    )
-    snapshot_set_id = fields.Many2one(
-        "doc.project.snapshot.set",
-        string="Global Snapshot Set",
-        help="Reusable pre-imported snapshot set shared across generation runs.",
-        ondelete="set null",
+        default=True,
     )
 
-    # ---------- word export ----------
-    word_attachment_id = fields.Many2one(
-        "ir.attachment", string="Word Document", readonly=True
-    )
+    # ------------------------------------------------------------------
+    # Project picker wizard button
+    # ------------------------------------------------------------------
+    def action_pick_project(self):
+        """Open the project picker wizard."""
+        self.ensure_one()
+        if 'project.project' not in self.env:
+            raise UserError(_("The 'project' module is not installed."))
+        wizard = self.env['doc.project.picker.wizard'].create({
+            'generation_id': self.id,
+            'project_name': self.project_task_project_name or '',
+        })
+        return {
+            'name': _('Select Project'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'doc.project.picker.wizard',
+            'res_id': wizard.id,
+            'view_mode': 'form',
+            'target': 'new',
+        }
 
-    # -------------------------------------------------------------------------
-    # Actions
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Onchange: auto-fill run name from selected module
+    # ------------------------------------------------------------------
+    @api.onchange('module_ids')
+    def _onchange_module_ids(self):
+        default_name = _("New Run")
+        current_name = (self.name or '').strip()
+        if current_name and current_name != default_name:
+            return
+        if not self.module_ids:
+            return
+        first_module = self.module_ids[:1]
+        auto_name = first_module.shortdesc or first_module.name or ''
+        if auto_name:
+            self.name = auto_name
+
+    # ------------------------------------------------------------------
+    # Step 1: collect texts
+    # ------------------------------------------------------------------
+    def _resolve_module_names(self):
+        names = list(self.module_ids.mapped("name"))
+        for raw in (self.module_names or "").split(","):
+            raw = raw.strip()
+            if raw and raw not in names:
+                names.append(raw)
+        return names
 
     def action_collect(self):
         self.ensure_one()
-        if not self.module_names:
-            raise UserError(_("Please enter at least one module name."))
+        modules = self._resolve_module_names()
+        if not modules:
+            raise UserError(_("Select at least one module to document."))
 
-        modules = [m.strip() for m in self.module_names.split(",") if m.strip()]
+        # Pre-import per-generation snapshots if no global set is selected
+        if self.enrich_from_project and not self.snapshot_set_id:
+            if self.project_task_project_id:
+                _logger.info(
+                    'action_collect: no snapshot_set \u2014 importing per-gen snaps '
+                    'for project_id=%s', self.project_task_project_id
+                )
+                self.env['doc.project.task.snapshot'].import_from_project(
+                    self.id, self.project_task_project_id
+                )
+            else:
+                _logger.info(
+                    'action_collect: enrich_from_project=True but no project '
+                    'and no snapshot_set \u2014 skipping snapshot import'
+                )
+
         introspector = self.env["doc.introspector"]
         parser = self.env["doc.source.parser"]
 
@@ -257,7 +327,6 @@ class DocGeneration(models.Model):
             [{'model': 'dpf.event', 'name': 'Event', 'transient': False}, ...]
         Then calls get_fields_meta() per model for field-level detail.
         """
-        # FIX: was incorrectly calling get_models_meta() — method is get_module_models()
         module_models = introspector.get_module_models(module_name)
         source_models = parsed.get("models", {})
         for entry in (module_models or []):
@@ -279,17 +348,14 @@ class DocGeneration(models.Model):
     def action_capture_screenshots(self):
         self.ensure_one()
         capturer = self.env['doc.screenshot.capturer']
-        capturer.run_for_generation(self)
+        capturer.capture_all(self)
         return True
 
-    def action_export_word(self):
+    def action_print_report(self):
+        self.ensure_one()
+        return self.env.ref('dpf_docs.action_report_doc_generation').report_action(self)
+
+    def action_download_word(self):
         self.ensure_one()
         exporter = self.env['doc.word.export']
-        attachment = exporter.export_generation(self)
-        self.word_attachment_id = attachment
-        self.state = 'done'
-        return {
-            'type': 'ir.actions.act_url',
-            'url': '/web/content/%s?download=true' % attachment.id,
-            'target': 'self',
-        }
+        return exporter.export_generation(self)
