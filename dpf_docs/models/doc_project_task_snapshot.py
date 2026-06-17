@@ -2,12 +2,25 @@
 """
 Persistent snapshot of project.task data.
 
-Each record represents one task imported from project.task.
-Can be attached to either:
-  * snapshot_set_id  (doc.project.snapshot.set)  — global shared pool
-  * generation_id    (doc.generation)             — legacy per-run pool
+Each record represents one task captured from project.task at import time.
+All data is stored as plain text — no live foreign keys to project.task.
+Once imported the snapshot survives project/task deletion.
 
-Exactly one of these is non-null on each record.
+Parent linkage
+--------------
+Each snapshot can belong to EITHER:
+  * snapshot_set_id  (doc.project.snapshot.set)  — global, shared pool (preferred)
+  * generation_id    (doc.generation)             — legacy per-generation pool
+
+Import strategy
+---------------
+_do_import downloads ALL tasks in a project in a SINGLE query:
+  * Main tasks (depth=0)
+  * Their direct subtasks (depth=1)
+  * Subtasks of subtasks (depth=2+)
+  ... up to any nesting depth.
+
+For the ЦПФ Этап 2 case this means 53 root tasks + 80 subtasks = 133 records.
 """
 import logging
 import re
@@ -45,13 +58,16 @@ def _html_to_plain(html):
 
 
 class DocProjectTaskSnapshot(models.Model):
-    """One imported project.task record, stored independently of the project module."""
+    """One task snapshot — fully self-contained copy of project.task data."""
 
     _name = 'doc.project.task.snapshot'
     _description = 'Auto Doc - Project Task Snapshot'
-    _order = 'depth, sequence, id'
+    _order = 'depth asc, sequence asc, id asc'
 
-    # Parent: one of these two is set, the other is False
+    # ------------------------------------------------------------------ #
+    # Parent container (exactly one is set)                                #
+    # ------------------------------------------------------------------ #
+
     snapshot_set_id = fields.Many2one(
         'doc.project.snapshot.set',
         string='Snapshot Set (global)',
@@ -65,35 +81,53 @@ class DocProjectTaskSnapshot(models.Model):
         index=True,
     )
 
-    # Original task identity — for traceability only, NOT a live FK
-    original_task_id = fields.Integer(string='Original task.id')
-    original_project_id = fields.Integer(string='Original project.id')
+    # ------------------------------------------------------------------ #
+    # Identity — traceability only, NOT live FKs                          #
+    # ------------------------------------------------------------------ #
 
-    # Task content snapshot
+    original_task_id = fields.Integer(
+        string='Original task.id',
+        index=True,
+        help='ID of the original project.task record. Used only for upsert matching.',
+    )
+    original_project_id = fields.Integer(
+        string='Original project.id',
+    )
+
+    # ------------------------------------------------------------------ #
+    # Task content (full copy at import time)                             #
+    # ------------------------------------------------------------------ #
+
     name = fields.Char(string='Task Name', required=True)
     description_plain = fields.Text(
         string='Description (plain text)',
         help='HTML description stripped to plain text at import time.',
     )
-
-    # Derived fields for fast lookup
     module_tag = fields.Char(
         string='Module Tag',
         index=True,
-        help='Lower-cased [tag] extracted from the task name prefix.',
+        help='Lower-cased [tag] extracted from the task name prefix. E.g. "dpf_docs".',
     )
     name_clean = fields.Char(
         string='Clean Name',
-        help='Task name with the [tag] prefix removed.',
+        help='Task name with the [tag] prefix stripped.',
     )
 
-    # Tree structure
-    depth = fields.Integer(string='Depth', default=0)
+    # ------------------------------------------------------------------ #
+    # Tree structure                                                       #
+    # ------------------------------------------------------------------ #
+
+    depth = fields.Integer(
+        string='Depth',
+        default=0,
+        help='0 = root/main task, 1 = direct subtask, 2 = subtask of subtask, …',
+    )
     sequence = fields.Integer(string='Sequence', default=10)
     parent_snapshot_id = fields.Many2one(
         'doc.project.task.snapshot',
         string='Parent Snapshot',
         ondelete='set null',
+        index=True,
     )
     child_snapshot_ids = fields.One2many(
         'doc.project.task.snapshot',
@@ -101,19 +135,24 @@ class DocProjectTaskSnapshot(models.Model):
         string='Child Snapshots',
     )
 
-    # ------------------------------------------------------------------
-    # Import helpers
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ #
+    # Public import API                                                    #
+    # ------------------------------------------------------------------ #
 
     @api.model
     def import_into_set(self, snapshot_set_id, project_id):
         """
-        Import all tasks from project_id into a global snapshot set.
+        Import ALL tasks from project_id into a global snapshot set.
 
-        Deletes previous snapshots for this set first. Safe to call multiple
-        times (idempotent refresh).
+        Downloads:
+          - All root/main tasks (tasks without parent or parent outside project)
+          - ALL subtasks at any nesting depth
 
-        Returns dict {'imported': N, 'skipped': N}.
+        The import is a full refresh: previous snapshots for this set are
+        deleted first.  Safe to call multiple times (idempotent).
+
+        Returns dict:
+          {'imported': N, 'root_tasks': N, 'subtasks': N, 'skipped': 0}
         """
         return self._do_import(
             project_id=project_id,
@@ -125,8 +164,7 @@ class DocProjectTaskSnapshot(models.Model):
     def import_from_project(self, generation_id, project_id):
         """
         Legacy API — import into a per-generation pool.
-
-        Kept for backward compatibility with doc_generation_project_mixin.
+        Kept for backward compatibility.
         """
         return self._do_import(
             project_id=project_id,
@@ -134,70 +172,117 @@ class DocProjectTaskSnapshot(models.Model):
             generation_id=generation_id,
         )
 
+    # ------------------------------------------------------------------ #
+    # Core import logic                                                    #
+    # ------------------------------------------------------------------ #
+
     @api.model
     def _do_import(self, project_id, snapshot_set_id=False, generation_id=False):
-        """Core import logic shared by both public APIs."""
+        """
+        Download all tasks (root + ALL subtasks) from project_id and store
+        them as snapshot records.
+
+        Strategy
+        --------
+        1. Load ALL project.task records where project_id = project_id in ONE
+           query.  This naturally includes subtasks because Odoo stores
+           subtasks under the same project_id.
+        2. Build a task-id → task dict for O(1) parent lookups.
+        3. For each task: walk the parent chain to determine depth.
+        4. Create snapshot records in task-id order so parents are always
+           created before their children (Odoo's search returns by id asc).
+        """
         if not project_id:
             _logger.warning('_do_import: project_id is falsy — nothing imported')
-            return {'imported': 0, 'skipped': 0}
+            return {'imported': 0, 'root_tasks': 0, 'subtasks': 0, 'skipped': 0}
 
         if 'project.task' not in self.env:
             _logger.warning(
                 '_do_import: project.task model not available '
-                '(project module not installed)'
+                '(Projects module not installed).'
             )
-            return {'imported': 0, 'skipped': 0}
+            return {'imported': 0, 'root_tasks': 0, 'subtasks': 0, 'skipped': 0}
 
         Task = self.env['project.task'].sudo()
 
+        # Verify project exists (optional — if project module present)
         if 'project.project' in self.env:
             project = self.env['project.project'].sudo().browse(project_id)
             if not project.exists():
                 _logger.warning(
-                    '_do_import: project.project id=%s does not exist', project_id
+                    '_do_import: project.project id=%s does not exist.', project_id
                 )
-                return {'imported': 0, 'skipped': 0}
+                return {'imported': 0, 'root_tasks': 0, 'subtasks': 0, 'skipped': 0}
 
-        # Delete previous snapshots for this container
+        # ---- Full refresh: remove previous snapshots for this container ----
         if snapshot_set_id:
-            self.search([('snapshot_set_id', '=', snapshot_set_id)]).unlink()
+            existing = self.search([('snapshot_set_id', '=', snapshot_set_id)])
         else:
-            self.search([('generation_id', '=', generation_id)]).unlink()
+            existing = self.search([('generation_id', '=', generation_id)])
+        if existing:
+            _logger.info(
+                '_do_import: deleting %s existing snapshots before re-import.',
+                len(existing),
+            )
+            existing.unlink()
 
-        # Load ALL tasks in the project (including archived) in one query
-        all_tasks = Task.search(
-            [('project_id', '=', project_id), ('active', 'in', [True, False])],
+        # ---- Load ALL tasks in project in one query ------------------------
+        # Odoo stores subtasks with the same project_id as the parent.
+        # Using active_test=False ensures archived tasks are also captured.
+        all_tasks = Task.with_context(active_test=False).search(
+            [('project_id', '=', project_id)],
             order='id asc',
         )
+        total_found = len(all_tasks)
         _logger.info(
-            '_do_import: project_id=%s — found %s tasks',
-            project_id, len(all_tasks),
+            '_do_import: project_id=%s — found %s tasks (including subtasks)',
+            project_id, total_found,
         )
 
+        if not all_tasks:
+            return {'imported': 0, 'root_tasks': 0, 'subtasks': 0, 'skipped': 0}
+
+        # Build lookup dict for O(1) parent chain walking
         task_by_id = {t.id: t for t in all_tasks}
+
+        # snap_by_task_id: task.id -> snapshot.id  (populated as we create)
         snap_by_task_id = {}
         imported = 0
+        root_count = 0
+        subtask_count = 0
 
         for task in all_tasks:
-            # Calculate depth by walking the parent chain
+            # ---- Determine depth by walking the parent chain ----
             depth = 0
             current = task
-            while current.parent_id and current.parent_id.id in task_by_id:
+            visited = set()  # Guard against circular refs (shouldn't happen but safe)
+            while (
+                current.parent_id
+                and current.parent_id.id in task_by_id
+                and current.parent_id.id not in visited
+            ):
+                visited.add(current.id)
                 depth += 1
                 current = task_by_id[current.parent_id.id]
-                if depth > 10:
+                if depth > 20:  # Hard cap — more than 20 nesting levels is pathological
+                    _logger.warning(
+                        '_do_import: task id=%s depth exceeded 20, capping.', task.id
+                    )
                     break
 
-            tag, clean = _strip_tag(task.name or '')
-
+            # ---- Resolve parent snapshot id ----
             parent_snap_id = False
             if task.parent_id and task.parent_id.id in snap_by_task_id:
                 parent_snap_id = snap_by_task_id[task.parent_id.id]
 
+            # ---- Extract tag and clean name ----
+            tag, clean = _strip_tag(task.name or '')
+
+            # ---- Build vals ----
             vals = {
                 'original_task_id': task.id,
                 'original_project_id': project_id,
-                'name': task.name or '',
+                'name': task.name or '(unnamed)',
                 'description_plain': _html_to_plain(task.description or ''),
                 'module_tag': tag or False,
                 'name_clean': clean or (task.name or ''),
@@ -213,9 +298,20 @@ class DocProjectTaskSnapshot(models.Model):
             snap = self.create(vals)
             snap_by_task_id[task.id] = snap.id
             imported += 1
+            if depth == 0:
+                root_count += 1
+            else:
+                subtask_count += 1
 
         _logger.info(
-            '_do_import: container=set:%s/gen:%s imported=%s',
-            snapshot_set_id, generation_id, imported,
+            '_do_import: DONE  container=set:%s/gen:%s  '
+            'total=%s  root=%s  subtasks=%s',
+            snapshot_set_id, generation_id,
+            imported, root_count, subtask_count,
         )
-        return {'imported': imported, 'skipped': 0}
+        return {
+            'imported': imported,
+            'root_tasks': root_count,
+            'subtasks': subtask_count,
+            'skipped': 0,
+        }
