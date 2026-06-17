@@ -24,7 +24,7 @@ from ..services import text_composer
 _logger = logging.getLogger(__name__)
 
 _SCREENSHOT_PLACEHOLDER = (
-    "\ud83d\udccc [\u0417\u0434\u0435\u0441\u044c \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u044d\u043a\u0440\u0430\u043d\u0430 \u00ab%s\u00bb]"
+    "\U0001f4cc [\u0417\u0434\u0435\u0441\u044c \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u044d\u043a\u0440\u0430\u043d\u0430 \u00ab%s\u00bb]"
 )
 
 
@@ -43,7 +43,6 @@ class DocGeneration(models.Model):
         "ir.module.module",
         string="\u0423\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u043c\u043e\u0434\u0443\u043b\u0438",
         domain="[('state', '=', 'installed')]",
-        help="\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u043b\u0438 \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u044b\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 \u0434\u043b\u044f \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f.",
     )
     module_names = fields.Char(
         string="\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u0434\u0443\u043b\u0438",
@@ -67,7 +66,6 @@ class DocGeneration(models.Model):
     )
     use_llm_caption = fields.Boolean(
         string="\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c LLM-\u043f\u043e\u0434\u043f\u0438\u0441\u0438",
-        help="\u0415\u0441\u043b\u0438 \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u043e, \u0432\u043d\u0435\u0448\u043d\u0438\u0439 \u0432\u043e\u0440\u043a\u0435\u0440 \u043c\u043e\u0436\u0435\u0442 \u043f\u043e\u0434\u043f\u0438\u0441\u044b\u0432\u0430\u0442\u044c \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442\u044b \u0447\u0435\u0440\u0435\u0437 Vision LLM.",
     )
     snapshot_set_id = fields.Many2one(
         "doc.project.snapshot.set",
@@ -75,7 +73,7 @@ class DocGeneration(models.Model):
         ondelete="set null",
         help=(
             "\u041d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e. "
-            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0439 \u0441\u043d\u0430\u043f\u0448\u043e\u0442 \u0437\u0430\u0434\u0430\u0447 \u043f\u0440\u043e\u0435\u043a\u0442\u0430 \u0434\u043b\u044f \u043e\u0431\u043e\u0433\u0430\u0449\u0435\u043d\u0438\u044f \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430\u0446\u0438\u0438. "
+            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0439 \u0441\u043d\u0430\u043f\u0448\u043e\u0442 \u0437\u0430\u0434\u0430\u0447 \u043f\u0440\u043e\u0435\u043a\u0442\u0430 \u0434\u043b\u044f \u043e\u0431\u043e\u0433\u0430\u0449\u0435\u043d\u0438\u044f. "
             "\u0415\u0441\u043b\u0438 \u043f\u0443\u0441\u0442\u043e \u2014 \u043e\u0431\u043e\u0433\u0430\u0449\u0435\u043d\u0438\u0435 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f."
         ),
     )
@@ -118,7 +116,6 @@ class DocGeneration(models.Model):
         return True
 
     def _collect_one_module(self, module_name, introspector, parser):
-        """Build a single doc.module with its menus and models."""
         ir_module = self.env["ir.module.module"].search(
             [("name", "=", module_name)], limit=1
         )
@@ -148,7 +145,6 @@ class DocGeneration(models.Model):
         return doc_module
 
     def _build_menus(self, doc_module, module_name, introspector):
-        """\u0421\u043e\u0437\u0434\u0430\u0442\u044c doc.menu \u0437\u0430\u043f\u0438\u0441\u0438 \u0438\u0437 \u0434\u0435\u0440\u0435\u0432\u0430 \u043c\u0435\u043d\u044e \u043c\u043e\u0434\u0443\u043b\u044f."""
         nodes = introspector.get_menu_tree(module_name)
         for node in nodes:
             res_model = node.get("res_model")
@@ -172,7 +168,6 @@ class DocGeneration(models.Model):
             })
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
-        """\u0421\u043e\u0437\u0434\u0430\u0442\u044c doc.model.info \u0437\u0430\u043f\u0438\u0441\u0438 \u0441 \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0451\u043d\u043d\u044b\u043c\u0438 \u0442\u0430\u0431\u043b\u0438\u0446\u0430\u043c\u0438 \u043f\u043e\u043b\u0435\u0439."""
         for minfo in introspector.get_module_models(module_name):
             res_model = minfo["model"]
             fields_meta = introspector.get_fields_meta(res_model)
@@ -286,7 +281,22 @@ class DocGeneration(models.Model):
             if func.requirements:
                 lines.append("**\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f:** %s" % func.requirements.strip())
                 lines.append("")
-            steps = func.step_lines() if hasattr(func, "step_lines") else []
+            # Safe step_lines: use method if exists, else fall back to field
+            if hasattr(func, 'step_lines') and callable(func.step_lines):
+                try:
+                    steps = func.step_lines()
+                except Exception:  # noqa: BLE001
+                    steps = [
+                        ln.strip()
+                        for ln in (func.steps or "").splitlines()
+                        if ln.strip()
+                    ]
+            else:
+                steps = [
+                    ln.strip()
+                    for ln in (func.steps or "").splitlines()
+                    if ln.strip()
+                ]
             if steps:
                 lines.append("**\u041f\u043e\u0440\u044f\u0434\u043e\u043a \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f:**")
                 for i, step in enumerate(steps, 1):
@@ -344,7 +354,6 @@ class DocGeneration(models.Model):
         return "\n".join(lines)
 
     def action_render_all(self):
-        """\u0420\u0435\u043d\u0434\u0435\u0440 Markdown \u0434\u043b\u044f \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0437\u0430\u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0433\u043e \u043c\u043e\u0434\u0443\u043b\u044f."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
             doc_module.markdown = self._render_markdown(doc_module)
@@ -352,7 +361,6 @@ class DocGeneration(models.Model):
         return True
 
     def action_capture_screenshots(self):
-        """\u041a\u043d\u043e\u043f\u043a\u0430 \u043e\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0430 \u0434\u043b\u044f \u0441\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u043c\u043e\u0441\u0442\u0438. \u0421\u043a\u0440\u0438\u043d\u0448\u043e\u0442\u044b \u0437\u0430\u0433\u0440\u0443\u0436\u0430\u044e\u0442\u0441\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e."""
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
@@ -369,7 +377,6 @@ class DocGeneration(models.Model):
         }
 
     def action_print_pdf(self):
-        """\u041f\u0435\u0447\u0430\u0442\u044c PDF-\u043e\u0442\u0447\u0451\u0442\u0430."""
         self.ensure_one()
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
@@ -378,7 +385,6 @@ class DocGeneration(models.Model):
         )
 
     def action_download_word(self):
-        """\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c Word-\u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442."""
         self.ensure_one()
         if not self.doc_module_ids:
             raise UserError(_("\u041d\u0435\u0447\u0435\u0433\u043e \u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c. \u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u0441\u0431\u043e\u0440 \u0442\u0435\u043a\u0441\u0442\u043e\u0432."))
@@ -402,7 +408,6 @@ class DocGeneration(models.Model):
         }
 
     def get_worker_spec(self):
-        """Return the JSON spec the Playwright worker consumes (legacy)."""
         self.ensure_one()
         modules = []
         for doc_module in self.doc_module_ids:
@@ -419,7 +424,6 @@ class DocGeneration(models.Model):
 
     @api.model
     def _cron_dispatch_pending(self):
-        """Cron: log pending generations (no browser is started)."""
         pending = self.search([("state", "=", "awaiting_shots")])
         for gen in pending:
             remaining = sum(

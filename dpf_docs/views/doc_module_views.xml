@@ -7,6 +7,11 @@
         <field name="arch" type="xml">
             <form string="Documented Module">
                 <header>
+                    <button name="action_enrich_from_snapshot"
+                            type="object"
+                            string="⚡ Обогатить из проекта"
+                            class="btn-secondary"
+                            help="Заполнить описания и функции из снапшота задач проекта. Требует заполненного Project Snapshot Set в генерации."/>
                     <button name="build_functions_from_menus" type="object"
                             string="Rebuild Functions"/>
                     <button name="action_capture_screenshots" type="object"
