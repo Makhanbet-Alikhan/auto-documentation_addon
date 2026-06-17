@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Root menu -->
+    <menuitem id="menu_dpf_docs_root"
+              name="Documentation"
+              sequence="90"/>
+
+    <!-- Documentation Runs -->
+    <menuitem id="menu_dpf_docs_generation"
+              name="Documentation Runs"
+              parent="menu_dpf_docs_root"
+              action="action_doc_generation"
+              sequence="10"/>
+
+    <!-- Global Project Snapshot Sets -->
+    <menuitem id="menu_dpf_docs_snapshot_sets"
+              name="Project Snapshots"
+              parent="menu_dpf_docs_root"
+              action="action_doc_project_snapshot_set"
+              sequence="20"/>
+</odoo>

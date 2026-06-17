@@ -1,0 +1,18 @@
+{
+  "name": "auto-doc-screenshot-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright worker that captures Odoo backend screenshots for dpf_docs.",
+  "type": "module",
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "login": "node auth.js",
+    "capture": "node capture.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}

@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- Base URL the Playwright worker must hit to reach this Odoo. -->
+        <record id="param_base_url" model="ir.config_parameter">
+            <field name="key">dpf_docs.base_url</field>
+            <field name="value">http://localhost:8069</field>
+        </record>
+
+        <!-- Shared secret the worker sends in the X-Doc-Token header so the
+             upload endpoint can authenticate it without a full user session. -->
+        <record id="param_worker_token" model="ir.config_parameter">
+            <field name="key">dpf_docs.worker_token</field>
+            <field name="value">change-me-please</field>
+        </record>
+
+        <!-- CSS selector that marks "the view has finished rendering".
+             Kept configurable so a backend upgrade only needs a param change. -->
+        <record id="param_ready_selector" model="ir.config_parameter">
+            <field name="key">dpf_docs.ready_selector</field>
+            <field name="value">.o_content</field>
+        </record>
+
+        <!-- Element to actually capture (content area without the top menu). -->
+        <record id="param_capture_selector" model="ir.config_parameter">
+            <field name="key">dpf_docs.capture_selector</field>
+            <field name="value">.o_action_manager</field>
+        </record>
+
+        <!-- Whether to call a Vision LLM to caption screenshots.
+             "0" = deterministic captions from metadata only. -->
+        <record id="param_use_llm_caption" model="ir.config_parameter">
+            <field name="key">dpf_docs.use_llm_caption</field>
+            <field name="value">0</field>
+        </record>
+
+        <!-- ============================================================
+             Automatic in-process screenshot capture (Playwright/Python).
+             The capturer logs into THIS Odoo with these credentials and
+             screenshots each documented screen automatically before export.
+             ============================================================ -->
+
+        <!-- Master switch: "1" = auto-capture missing screenshots before
+             every PDF/Word export. Set to "0" to rely on manual uploads. -->
+        <record id="param_auto_capture" model="ir.config_parameter">
+            <field name="key">dpf_docs.auto_capture</field>
+            <field name="value">1</field>
+        </record>
+
+        <!-- Login used by the headless browser to reach the web client.
+             Use a dedicated documentation user with read access to the
+             documented screens. -->
+        <record id="param_capture_login" model="ir.config_parameter">
+            <field name="key">dpf_docs.capture_login</field>
+            <field name="value">admin</field>
+        </record>
+        <record id="param_capture_password" model="ir.config_parameter">
+            <field name="key">dpf_docs.capture_password</field>
+            <field name="value">admin</field>
+        </record>
+
+        <!-- Milliseconds to wait for an Owl view to render before capture. -->
+        <record id="param_render_timeout" model="ir.config_parameter">
+            <field name="key">dpf_docs.render_timeout</field>
+            <field name="value">20000</field>
+        </record>
+
+        <!-- Browser viewport + scale for crisp, reproducible screenshots. -->
+        <record id="param_viewport_width" model="ir.config_parameter">
+            <field name="key">dpf_docs.viewport_width</field>
+            <field name="value">1600</field>
+        </record>
+        <record id="param_viewport_height" model="ir.config_parameter">
+            <field name="key">dpf_docs.viewport_height</field>
+            <field name="value">900</field>
+        </record>
+        <record id="param_device_scale" model="ir.config_parameter">
+            <field name="key">dpf_docs.device_scale</field>
+            <field name="value">2</field>
+        </record>
+
+    </data>
+</odoo>
