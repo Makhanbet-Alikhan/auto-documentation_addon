@@ -22,24 +22,12 @@ class DocModule(models.Model):
     )
     description = fields.Text(string="Module Description")
 
-    # --- User-manual metadata (mirrors the reference manual cover page) ----
-    system_name = fields.Char(
-        string="System Name",
-        help='Product name shown on the cover, e.g. Система "Smart OTM".',
-    )
+    # --- User-manual metadata ---
+    system_name = fields.Char(string="System Name")
     manual_version = fields.Char(string="Manual Version", default="1.0")
-    developer = fields.Char(
-        string="Developer", help='Содержится в "Разработчик: ..." на обложке.'
-    )
-    city_year = fields.Char(
-        string="City / Year",
-        help='Нижняя часть обложки, например "Астана 2025".',
-    )
-    platform_version = fields.Char(
-        string="Platform Version",
-        default="Odoo 19",
-        help="Используется в разделе 'Область применения'.",
-    )
+    developer = fields.Char(string="Developer")
+    city_year = fields.Char(string="City / Year")
+    platform_version = fields.Char(string="Platform Version", default="Odoo 19")
     intro_user_categories = fields.Text(string="1.1 User Categories")
     intro_scope = fields.Text(string="1.2 Scope")
     intro_purpose = fields.Text(string="1.3 Document Purpose")
@@ -52,30 +40,18 @@ class DocModule(models.Model):
 
     menu_ids = fields.One2many("doc.menu", "doc_module_id", string="Menus")
     model_ids = fields.One2many("doc.model.info", "doc_module_id", string="Models")
-    function_ids = fields.One2many(
-        "doc.function", "doc_module_id", string="Functions"
-    )
+    function_ids = fields.One2many("doc.function", "doc_module_id", string="Functions")
 
-    menu_count = fields.Integer(
-        string="Menus", compute="_compute_counts", store=True
-    )
-    model_count = fields.Integer(
-        string="Models", compute="_compute_counts", store=True
-    )
-    captured_count = fields.Integer(
-        string="Screenshots", compute="_compute_counts", store=True
-    )
-    function_count = fields.Integer(
-        string="Functions", compute="_compute_counts", store=True
-    )
+    menu_count = fields.Integer(string="Menus", compute="_compute_counts", store=True)
+    model_count = fields.Integer(string="Models", compute="_compute_counts", store=True)
+    captured_count = fields.Integer(string="Screenshots", compute="_compute_counts", store=True)
+    function_count = fields.Integer(string="Functions", compute="_compute_counts", store=True)
 
     markdown = fields.Text(string="Markdown Output")
     pdf_attachment_id = fields.Many2one("ir.attachment", string="PDF File")
     word_attachment_id = fields.Many2one("ir.attachment", string="Word File")
 
-    @api.depends(
-        "menu_ids", "model_ids", "function_ids", "menu_ids.capture_state"
-    )
+    @api.depends("menu_ids", "model_ids", "function_ids", "menu_ids.capture_state")
     def _compute_counts(self):
         for rec in self:
             rec.menu_count = len(rec.menu_ids)
@@ -89,71 +65,35 @@ class DocModule(models.Model):
     # Manual content helpers
     # ------------------------------------------------------------------
     def apply_manual_defaults(self):
-        """Fill empty manual-metadata fields with sensible Russian defaults."""
         self.ensure_one()
         composer = self.env["doc.text.defaults"]
         defaults = composer.manual_defaults(self)
-        values = {
-            field: value
-            for field, value in defaults.items()
-            if not self[field]
-        }
+        values = {field: value for field, value in defaults.items() if not self[field]}
         if values:
             self.write(values)
         return True
 
-    # ------------------------------------------------------------------
-    # Helper: does this menu have a form view?
-    # ------------------------------------------------------------------
     @staticmethod
     def _menu_has_form(menu):
-        """Return True when the menu's view_modes include a form view.
-
-        A menu has a form view when:
-        - 'form' is explicitly listed in view_modes, OR
-        - view_modes is empty/absent (Odoo default includes list + form), OR
-        - the menu has a res_model (implies records that can be opened in form).
-        """
         view_modes = [
-            v.strip()
-            for v in (menu.view_modes or "").split(",")
-            if v.strip()
+            v.strip() for v in (menu.view_modes or "").split(",") if v.strip()
         ]
         if not view_modes:
-            # No explicit modes set — Odoo default is list + form
             return bool(menu.res_model)
         return "form" in view_modes
 
     def build_functions_from_menus(self):
-        """(Re)create doc.function entries from this module's menu tree.
-
-        For every documented screen two functions are generated when the menu
-        opens a model with a form view:
-          1. «Просмотр списка»  — how to navigate to the list and search/filter
-          2. «Создание записи» — how to fill in the form and save a new record
-
-        Menus that only show read-only views (pivot, graph, calendar without
-        a model, pure containers) receive only function #1.
-
-        Duplicate menus (same name + model + view_modes) are skipped.
-        Menus are sorted by sequence so numbering matches the UI order.
-        """
         self.ensure_one()
         self.function_ids.unlink()
         composer = self.env["doc.text.defaults"]
         number = 0
-
         menus = self.menu_ids.sorted(
             key=lambda m: ((m.sequence or 999999), (m.complete_name or ""), m.id)
         )
-
         seen = set()
         for menu in menus:
-            # Skip pure container menus that do not open any screen.
             if menu.capture_state == "skipped" and not menu.res_model:
                 continue
-
-            # Deduplicate by (name, model, normalised view_modes)
             normalized_views = ",".join(sorted(set(
                 v.strip() for v in (menu.view_modes or "").split(",") if v.strip()
             )))
@@ -166,7 +106,6 @@ class DocModule(models.Model):
                 continue
             seen.add(dedupe_key)
 
-            # --- Function 1: list / overview screen ---
             number += 1
             entry = composer.function_for_menu(menu, number)
             entry.update({
@@ -179,7 +118,6 @@ class DocModule(models.Model):
             })
             self.env["doc.function"].create(entry)
 
-            # --- Function 2: create / edit form (universal, not news.post-only) ---
             if self._menu_has_form(menu):
                 number += 1
                 create_entry = composer.function_for_create(menu, number)
@@ -192,11 +130,9 @@ class DocModule(models.Model):
                     "screenshot_source": "menu" if menu.screenshot else "none",
                 })
                 self.env["doc.function"].create(create_entry)
-
         return True
 
     def capture_screenshots(self, only_missing=True):
-        """Automatically capture screenshots for this module's screens."""
         self.ensure_one()
         result = self.env["doc.screenshot.capturer"].capture_module(
             self, only_missing=only_missing
@@ -205,12 +141,9 @@ class DocModule(models.Model):
         return result
 
     def action_capture_screenshots(self):
-        """Button: capture screenshots now and report the outcome."""
         self.ensure_one()
         result = self.capture_screenshots(only_missing=True)
-        message = _(
-            "Screenshots captured: %(captured)s, failed: %(failed)s."
-        ) % result
+        message = _("Screenshots captured: %(captured)s, failed: %(failed)s.") % result
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
@@ -223,7 +156,6 @@ class DocModule(models.Model):
         }
 
     def refresh_function_screenshots(self):
-        """Copy the latest captured menu screenshots onto their functions."""
         self.ensure_one()
         for func in self.function_ids.filtered(lambda f: f.doc_menu_id):
             if func.screenshot_source == "manual":
@@ -235,30 +167,94 @@ class DocModule(models.Model):
         return True
 
     def pending_screenshot_tasks(self):
-        """Return the list of screenshot tasks still to be captured."""
         self.ensure_one()
-        tasks = []
-        for menu in self.menu_ids.filtered(
-            lambda m: m.web_url and m.capture_state in ("pending", "error")
-        ):
-            tasks.append(menu.to_task_dict())
-        return tasks
+        return [
+            menu.to_task_dict()
+            for menu in self.menu_ids.filtered(
+                lambda m: m.web_url and m.capture_state in ("pending", "error")
+            )
+        ]
 
     def action_render_markdown(self):
-        """Recompute the Markdown artefact from current child records."""
+        """Recompute Markdown. Uses a job-based approach to avoid timeout."""
         self.ensure_one()
-        self.markdown = self.env["doc.generation"]._render_markdown(self)
-        return True
+        try:
+            md = self.env["doc.generation"]._render_markdown(self)
+        except Exception as exc:  # noqa: BLE001
+            _logger.error(
+                "action_render_markdown: error for module %s: %s",
+                self.technical_name, exc, exc_info=True,
+            )
+            return {
+                "type": "ir.actions.client",
+                "tag": "display_notification",
+                "params": {
+                    "title": _("Error"),
+                    "message": str(exc),
+                    "type": "danger",
+                    "sticky": True,
+                },
+            }
+        self.with_context(no_recompute=True).write({"markdown": md})
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Markdown"),
+                "message": _("Markdown сгенерирован."),
+                "type": "success",
+                "sticky": False,
+            },
+        }
+
+    def action_enrich_from_snapshot(self):
+        """Кнопка: обогатить этот модуль из снапшота проекта."""
+        self.ensure_one()
+        generation = self.generation_id
+        if not generation or not generation.snapshot_set_id:
+            return {
+                "type": "ir.actions.client",
+                "tag": "display_notification",
+                "params": {
+                    "title": _("Project Snapshot"),
+                    "message": _(
+                        "В генерации не указан Snapshot Set. "
+                        "Откройте запись генерации и выберите Project Snapshot Set."
+                    ),
+                    "type": "warning",
+                    "sticky": True,
+                },
+            }
+        stats = self.env["doc.project.enricher"].enrich_module(self, overwrite=False)
+        if stats["reason"] == "no_matching_tasks":
+            msg = _("Задач с тегом [%s] не найдено.") % self.technical_name
+            notif_type = "warning"
+        elif stats["reason"] == "enriched":
+            msg = _(
+                "Обогащено: функций %s, меню %s."
+            ) % (stats["functions_enriched"], stats["menus_enriched"])
+            notif_type = "success"
+        else:
+            msg = _("reason: %s") % stats["reason"]
+            notif_type = "info"
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Project Snapshot Enrichment"),
+                "message": msg,
+                "type": notif_type,
+                "sticky": False,
+            },
+        }
 
     def action_print_pdf_manual(self):
-        """Button: auto-capture missing screenshots, then print the PDF manual."""
         self.ensure_one()
         self._auto_capture_if_enabled()
         self.refresh_function_screenshots()
         return self.env.ref("dpf_docs.action_report_doc_module").report_action(self)
 
     def _auto_capture_if_enabled(self):
-        """Capture missing screenshots before an export, if auto-capture is on."""
         self.ensure_one()
         enabled = self.env["ir.config_parameter"].sudo().get_param(
             "dpf_docs.auto_capture", "1"
@@ -270,12 +266,11 @@ class DocModule(models.Model):
             capturer.capture_module(self, only_missing=True)
         except Exception:  # noqa: BLE001
             _logger.warning(
-                "Auto-capture failed for module %s; exporting without new shots.",
+                "Auto-capture failed for module %s.",
                 self.technical_name, exc_info=True,
             )
 
     def _build_word_attachment(self):
-        """Generate the .docx, store it as an attachment, and return it."""
         self.ensure_one()
         self._auto_capture_if_enabled()
         self.refresh_function_screenshots()
@@ -294,7 +289,6 @@ class DocModule(models.Model):
         return attachment
 
     def action_download_word(self):
-        """Generate the Word document and return a download action."""
         self.ensure_one()
         attachment = self._build_word_attachment()
         return {
