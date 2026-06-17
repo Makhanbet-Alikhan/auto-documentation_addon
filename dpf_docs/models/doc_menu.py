@@ -1,0 +1,66 @@
+# -*- coding: utf-8 -*-
+"""Stored documentation for a single menu / screen.
+
+One ``doc.menu`` record represents one node in the module's menu tree. Leaf
+nodes that carry a window action are the ones the Playwright worker will
+screenshot; the captured image is stored in :attr:`screenshot`.
+"""
+from odoo import fields, models
+
+
+class DocMenu(models.Model):
+    _name = "doc.menu"
+    _description = "Auto Doc - Documented Menu / Screen"
+    _order = "sequence, id"
+
+    doc_module_id = fields.Many2one(
+        "doc.module", string="Documentation", required=True, ondelete="cascade"
+    )
+
+    # --- Identity ----------------------------------------------------------
+    menu_xmlid = fields.Char(string="Menu Path")
+    name = fields.Char(string="Menu Name", required=True)
+    complete_name = fields.Char(string="Full Path")
+    sequence = fields.Integer(string="Sequence", default=10)
+
+    # --- Action / view info ------------------------------------------------
+    odoo_menu_id = fields.Integer(string="Odoo Menu ID")
+    action_id = fields.Integer(string="Action ID")
+    res_model = fields.Char(string="Target Model")
+    view_modes = fields.Char(string="View Modes")
+    web_url = fields.Char(
+        string="Web URL",
+        help="Stable client URL the worker navigates to, e.g. /odoo/action-42.",
+    )
+
+    # --- Generated documentation ------------------------------------------
+    caption = fields.Text(
+        string="Screen Description",
+        help="Deterministic (or LLM) description of what the screen shows.",
+    )
+    screenshot = fields.Binary(string="Screenshot", attachment=True)
+    screenshot_filename = fields.Char(string="Screenshot Filename")
+
+    # --- Worker bookkeeping -----------------------------------------------
+    capture_state = fields.Selection(
+        [
+            ("pending", "Pending"),
+            ("captured", "Captured"),
+            ("skipped", "Skipped (no action)"),
+            ("error", "Error"),
+        ],
+        string="Capture State",
+        default="pending",
+    )
+    capture_error = fields.Char(string="Capture Error")
+
+    def to_task_dict(self):
+        """Serialise this menu into a screenshot task for the worker."""
+        self.ensure_one()
+        return {
+            "doc_menu_id": self.id,
+            "name": self.name,
+            "web_url": self.web_url,
+            "res_model": self.res_model,
+            "view_modes": (self.view_modes or "").split(",") if self.view_modes else [],
+        }

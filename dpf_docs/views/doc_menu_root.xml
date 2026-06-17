@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <menuitem id="menu_auto_doc_root"
+              name="Auto Documentation"
+              web_icon="dpf_docs,static/description/icon.png"
+              sequence="90"/>
+
+    <menuitem id="menu_auto_doc_generation"
+              name="Generations"
+              parent="menu_auto_doc_root"
+              action="action_doc_generation"
+              sequence="10"/>
+
+    <menuitem id="menu_auto_doc_modules"
+              name="Documented Modules"
+              parent="menu_auto_doc_root"
+              action="action_doc_module"
+              sequence="20"/>
+
+    <menuitem id="menu_auto_doc_screens"
+              name="Screens"
+              parent="menu_auto_doc_root"
+              action="action_doc_menu"
+              sequence="30"/>
+
+</odoo>

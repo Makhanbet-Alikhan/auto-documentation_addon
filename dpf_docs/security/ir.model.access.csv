@@ -1,0 +1,11 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_doc_generation_user,doc.generation.user,model_doc_generation,group_doc_user,1,1,1,1
+access_doc_module_user,doc.module.user,model_doc_module,group_doc_user,1,1,1,1
+access_doc_menu_user,doc.menu.user,model_doc_menu,group_doc_user,1,1,1,1
+access_doc_model_info_user,doc.model.info.user,model_doc_model_info,group_doc_user,1,1,1,1
+access_doc_function_user,doc.function.user,model_doc_function,group_doc_user,1,1,1,1
+access_doc_generation_manager,doc.generation.manager,model_doc_generation,group_doc_manager,1,1,1,1
+access_doc_module_manager,doc.module.manager,model_doc_module,group_doc_manager,1,1,1,1
+access_doc_menu_manager,doc.menu.manager,model_doc_menu,group_doc_manager,1,1,1,1
+access_doc_model_info_manager,doc.model.info.manager,model_doc_model_info,group_doc_manager,1,1,1,1
+access_doc_function_manager,doc.function.manager,model_doc_function,group_doc_manager,1,1,1,1

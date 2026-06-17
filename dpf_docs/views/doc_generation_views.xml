@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_doc_generation_form" model="ir.ui.view">
+        <field name="name">doc.generation.form</field>
+        <field name="model">doc.generation</field>
+        <field name="arch" type="xml">
+            <form string="Documentation Generation">
+                <header>
+                    <button name="action_collect" type="object"
+                            string="1. Collect Texts" class="btn-primary"
+                            invisible="state not in ('draft',)"/>
+                    <button name="action_capture_screenshots" type="object"
+                            string="2. Capture Screenshots" class="btn-primary"
+                            invisible="state not in ('awaiting_shots',)"
+                            help="Automatically screenshot every documented screen using a headless browser."/>
+                    <button name="action_render_all" type="object"
+                            string="3. Render Markdown"
+                            invisible="state not in ('awaiting_shots',)"/>
+                    <button name="action_print_pdf" type="object"
+                            string="Print PDF"
+                            invisible="state in ('draft',)"/>
+                    <button name="action_download_word" type="object"
+                            string="Download Word"
+                            invisible="state in ('draft',)"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="module_ids" widget="many2many_tags"
+                                   options="{'no_create': True}"/>
+                            <field name="module_names"
+                                   placeholder="optional: e.g. sale, my_addon"/>
+                        </group>
+                        <group>
+                            <field name="use_llm_caption"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Documented Modules">
+                            <field name="doc_module_ids" readonly="1">
+                                <list>
+                                    <field name="name"/>
+                                    <field name="technical_name"/>
+                                    <field name="menu_count"/>
+                                    <field name="captured_count"/>
+                                    <field name="model_count"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="How it works">
+                            <div class="alert alert-info" role="alert">
+                                <p><b>Step 1</b> — Collect Texts: introspects the ORM and
+                                parses Python docstrings/comments.</p>
+                                <p><b>Step 2</b> — Capture Screenshots: a headless browser
+                                runs <i>inside</i> Odoo, logs into the web client and
+                                screenshots every documented screen automatically. Each
+                                image is bound to its own screen, so it always appears
+                                directly under that screen's text in the manual.</p>
+                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download
+                                Word. Missing screenshots are also captured automatically
+                                right before each export.</p>
+                                <p class="text-muted">Requires the <code>playwright</code>
+                                Python package and Chromium in the Odoo container. You can
+                                always upload screenshots manually on each function as a
+                                fallback.</p>
+                            </div>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_doc_generation_list" model="ir.ui.view">
+        <field name="name">doc.generation.list</field>
+        <field name="model">doc.generation</field>
+        <field name="arch" type="xml">
+            <list string="Documentation Runs">
+                <field name="name"/>
+                <field name="module_ids" widget="many2many_tags"/>
+                <field name="state"/>
+                <field name="create_date"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_doc_generation" model="ir.actions.act_window">
+        <field name="name">Documentation Runs</field>
+        <field name="res_model">doc.generation</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+</odoo>
