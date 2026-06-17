@@ -10,6 +10,11 @@
                     <button name="action_collect" type="object"
                             string="1. Collect Texts" class="btn-primary"
                             invisible="state not in ('draft',)"/>
+                    <button name="action_enrich_all_modules" type="object"
+                            string="⚡ Обогатить из проекта"
+                            class="btn-secondary"
+                            invisible="state in ('draft',) or not snapshot_set_id"
+                            help="Повторно запустить обогащение всех модулей из снапшота задач проекта."/>
                     <button name="action_capture_screenshots" type="object"
                             string="2. Capture Screenshots" class="btn-primary"
                             invisible="state not in ('awaiting_shots',)"
@@ -22,6 +27,7 @@
                             invisible="state in ('draft',)"/>
                     <button name="action_download_word" type="object"
                             string="Download Word"
+                            class="btn-primary"
                             invisible="state in ('draft',)"/>
                     <field name="state" widget="statusbar"/>
                 </header>
@@ -30,7 +36,8 @@
                         <group>
                             <field name="name"/>
                             <field name="module_ids" widget="many2many_tags"
-                                   options="{'no_create': True}"/>
+                                   options="{'no_create': True}"
+                                   context="{}"/>
                             <field name="module_names"
                                    placeholder="optional: e.g. sale, my_addon"/>
                         </group>
@@ -38,7 +45,7 @@
                             <field name="use_llm_caption"/>
                             <field name="snapshot_set_id"
                                    options="{'no_create': True}"
-                                   help="Optional. Select a pre-imported project snapshot set to enrich documentation with task data. If left empty, enrichment is skipped."/>
+                                   help="Необязательно. Выберите глобальный снапшот задач проекта для обогащения."/>
                         </group>
                     </group>
                     <notebook>
@@ -56,19 +63,16 @@
                         <page string="How it works">
                             <div class="alert alert-info" role="alert">
                                 <p><b>Step 1</b> — Collect Texts: introspects the ORM and
-                                parses Python docstrings/comments.</p>
-                                <p><b>Step 2</b> — Capture Screenshots: a headless browser
-                                runs <i>inside</i> Odoo, logs into the web client and
-                                screenshots every documented screen automatically. Each
-                                image is bound to its own screen, so it always appears
-                                directly under that screen's text in the manual.</p>
-                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download
-                                Word. Missing screenshots are also captured automatically
-                                right before each export.</p>
-                                <p class="text-muted">Requires the <code>playwright</code>
-                                Python package and Chromium in the Odoo container. You can
-                                always upload screenshots manually on each function as a
-                                fallback.</p>
+                                parses Python docstrings/comments.
+                                If a Project Snapshot Set is selected, modules are also
+                                enriched automatically with task data from the project.</p>
+                                <p><b>⚡ Обогатить из проекта</b> — повторно запускает обогащение
+                                всех модулей без повторного Collect. Требует выбранного
+                                Project Snapshot Set.</p>
+                                <p><b>Step 2</b> — Capture Screenshots: headless browser
+                                screenshots every documented screen automatically.</p>
+                                <p><b>Step 3</b> — Render Markdown / Print PDF / Download Word.
+                                Missing screenshots are also captured right before export.</p>
                             </div>
                         </page>
                     </notebook>
