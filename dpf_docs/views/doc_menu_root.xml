@@ -24,4 +24,10 @@
               action="action_doc_menu"
               sequence="30"/>
 
+    <menuitem id="menu_auto_doc_project_snapshots"
+              name="Project Snapshots"
+              parent="menu_auto_doc_root"
+              action="action_doc_project_snapshot_set"
+              sequence="40"/>
+
 </odoo>

@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================ -->
+    <!--  doc.project.snapshot.set  —  FORM                          -->
+    <!-- ============================================================ -->
+    <record id="view_doc_project_snapshot_set_form" model="ir.ui.view">
+        <field name="name">doc.project.snapshot.set.form</field>
+        <field name="model">doc.project.snapshot.set</field>
+        <field name="arch" type="xml">
+            <form string="Project Snapshot Set">
+                <header>
+                    <button name="action_import"
+                            type="object"
+                            string="↓ Import / Refresh from Project"
+                            class="btn-primary"
+                            confirm="This will DELETE all existing snapshots in this set and re-import all tasks from the project. Continue?"
+                            help="Downloads ALL tasks (root + subtasks) from the configured Project ID and stores a full plain-text copy. Safe to run multiple times."/>
+                    <button name="action_view_modules"
+                            type="object"
+                            string="Show Module Tags"
+                            class="btn-secondary"
+                            help="Lists all unique [tag] prefixes found in this snapshot — useful to check which modules have tasks."/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name" placeholder="e.g. ЦПФ Этап 2 — June 2026"/></h1>
+                    </div>
+                    <group>
+                        <group string="Source Project">
+                            <field name="project_id"
+                                   help="Numeric ID of the project.project record. Find it in the URL when you open the project in Odoo Projects (e.g. /odoo/project/42)."/>
+                            <field name="project_name" readonly="1"
+                                   placeholder="Auto-filled on import"/>
+                            <field name="last_import_date" readonly="1"/>
+                        </group>
+                        <group string="Statistics">
+                            <field name="task_count" readonly="1"/>
+                            <field name="root_task_count" readonly="1"/>
+                            <field name="subtask_count" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Notes">
+                        <field name="notes" nolabel="1"
+                               placeholder="Optional notes: branch, sprint, date, etc."/>
+                    </group>
+                    <notebook>
+                        <page string="Task Snapshots">
+                            <field name="snapshot_ids" readonly="1">
+                                <list decoration-muted="depth &gt; 0">
+                                    <field name="depth" string="Lvl"
+                                           optional="show"/>
+                                    <field name="module_tag" optional="show"/>
+                                    <field name="name"/>
+                                    <field name="name_clean" optional="hide"/>
+                                    <field name="original_task_id"
+                                           optional="hide"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="How to use">
+                            <div class="alert alert-info" role="alert">
+                                <p><b>1.</b> Set the <b>Project ID</b> (copy from the URL
+                                when you open the project in Odoo Projects).</p>
+                                <p><b>2.</b> Click <b>↓ Import / Refresh from Project</b>.
+                                All tasks — including subtasks at any nesting depth — are
+                                downloaded and stored as plain-text snapshots.
+                                <br/>The snapshots are <b>independent</b>: deleting or
+                                uninstalling the Projects module does NOT remove them.</p>
+                                <p><b>3.</b> On the <b>Documentation Run</b> (Generation)
+                                form, select this snapshot set in the
+                                <i>Project Snapshot Set</i> field.</p>
+                                <p><b>4.</b> Click <b>1. Collect Texts</b> — the enricher
+                                will automatically find tasks tagged
+                                <code>[technical_name]</code> and insert their content
+                                into the documentation. If no tasks are tagged for a
+                                module, that module is simply skipped — no errors.</p>
+                            </div>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ============================================================ -->
+    <!--  doc.project.snapshot.set  —  LIST                          -->
+    <!-- ============================================================ -->
+    <record id="view_doc_project_snapshot_set_list" model="ir.ui.view">
+        <field name="name">doc.project.snapshot.set.list</field>
+        <field name="model">doc.project.snapshot.set</field>
+        <field name="arch" type="xml">
+            <list string="Project Snapshot Sets">
+                <field name="name"/>
+                <field name="project_name"/>
+                <field name="project_id" optional="hide"/>
+                <field name="task_count" string="Tasks"/>
+                <field name="root_task_count" string="Root"/>
+                <field name="subtask_count" string="Subtasks"/>
+                <field name="last_import_date" string="Last Import"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ============================================================ -->
+    <!--  doc.project.task.snapshot  —  LIST (standalone)            -->
+    <!-- ============================================================ -->
+    <record id="view_doc_project_task_snapshot_list" model="ir.ui.view">
+        <field name="name">doc.project.task.snapshot.list</field>
+        <field name="model">doc.project.task.snapshot</field>
+        <field name="arch" type="xml">
+            <list string="Task Snapshots" default_order="depth,sequence,id">
+                <field name="snapshot_set_id" optional="hide"/>
+                <field name="depth" string="Lvl"/>
+                <field name="module_tag"/>
+                <field name="name"/>
+                <field name="name_clean" optional="hide"/>
+                <field name="description_plain" optional="hide"/>
+                <field name="original_task_id" optional="hide"/>
+                <field name="parent_snapshot_id" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ============================================================ -->
+    <!--  Actions                                                     -->
+    <!-- ============================================================ -->
+    <record id="action_doc_project_snapshot_set" model="ir.actions.act_window">
+        <field name="name">Project Snapshots</field>
+        <field name="res_model">doc.project.snapshot.set</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No snapshot sets yet.
+            </p>
+            <p>
+                Create one, enter the Project ID and click
+                <b>↓ Import / Refresh from Project</b>.
+            </p>
+        </field>
+    </record>
+
+</odoo>

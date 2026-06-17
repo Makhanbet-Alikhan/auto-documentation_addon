@@ -18,6 +18,8 @@ Generates technical/user documentation for any installed Odoo module:
 * Per-menu description built from model metadata (and optional Vision LLM).
 * Field tables (string, help, type, required) via fields_get().
 * Texts extracted from Python docstrings AND inline comments (AST + tokenize).
+* Optional enrichment from project task snapshots (stored globally,
+  independent of the Projects module).
 
 Output formats: QWeb PDF, standalone HTML, Markdown.
 
@@ -55,6 +57,7 @@ Architecture
         "views/doc_generation_views.xml",
         "views/doc_module_views.xml",
         "views/doc_menu_views.xml",
+        "views/doc_project_snapshot_views.xml",
         "views/doc_menu_root.xml",
     ],
     "assets": {},
