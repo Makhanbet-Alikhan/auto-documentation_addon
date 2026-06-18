@@ -5,11 +5,51 @@ Generates plain-language, step-by-step wording for every section of the
 user manual so that a non-technical reader can understand how to use the
 documented module without any developer knowledge.
 
-All texts are written in Russian. The function_for_menu() method now generates
-detailed, click-by-click instructions based on the menu's name, model and
-view modes — ready for a real «Руководство пользователя».
+All texts are written in Russian.
+
+Key design principle — UNIQUE TEXT PER MENU:
+  Every menu gets its own description, field list and steps derived from the
+  real ORM field metadata stored in ``doc.menu.fields_meta_json``.  The
+  generic fallback is used only when no model metadata is available.
 """
+import logging
+
 from odoo import api, models
+
+_logger = logging.getLogger(__name__)
+
+# Fields that are always present in every Odoo model but carry no
+# user-visible meaning in a user manual — skip them.
+_SYSTEM_FIELDS = frozenset({
+    "id", "create_uid", "create_date", "write_uid", "write_date",
+    "__last_update", "display_name", "message_ids", "message_follower_ids",
+    "message_partner_ids", "message_is_follower", "message_unread_counter",
+    "message_needaction_counter", "message_has_error", "message_attachment_count",
+    "activity_ids", "activity_state", "activity_user_id", "activity_type_id",
+    "activity_date_deadline", "activity_summary", "activity_exception_decoration",
+    "activity_exception_icon", "website_message_ids", "has_message",
+})
+
+# Human-readable type hints for common Odoo field types
+_TYPE_HINTS = {
+    "char":        "текстовое поле",
+    "text":        "многострочный текст",
+    "html":        "текст с форматированием",
+    "integer":     "целое число",
+    "float":       "числовое значение",
+    "monetary":    "денежная сумма",
+    "boolean":     "флаг (да / нет)",
+    "date":        "дата",
+    "datetime":    "дата и время",
+    "selection":   "выбор из списка",
+    "many2one":    "связанная запись",
+    "many2many":   "несколько связанных записей",
+    "one2many":    "вложенный список",
+    "binary":      "файл / изображение",
+    "image":       "изображение",
+    "reference":   "ссылка на запись",
+    "json":        "JSON-данные",
+}
 
 
 class DocTextDefaults(models.AbstractModel):
@@ -163,6 +203,93 @@ class DocTextDefaults(models.AbstractModel):
         )
 
     # ------------------------------------------------------------------
+    # Internal helpers — field metadata processing
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _usable_fields(fields_meta):
+        """Return a filtered, sorted list of (fname, fmeta) tuples.
+
+        Removes system / technical fields that have no user-facing meaning
+        and sorts required fields first, then by field name.
+        """
+        if not fields_meta:
+            return []
+        result = []
+        for fname, fmeta in fields_meta.items():
+            if fname in _SYSTEM_FIELDS:
+                continue
+            ftype = fmeta.get("type", "")
+            # Skip computed-only / non-stored relational counters
+            if ftype in ("one2many",):
+                continue
+            result.append((fname, fmeta))
+        # Required first, then alphabetical by label
+        result.sort(key=lambda x: (not x[1].get("required", False), x[1].get("string", x[0]).lower()))
+        return result
+
+    @staticmethod
+    def _type_hint(ftype):
+        return _TYPE_HINTS.get(ftype, ftype or "")
+
+    @classmethod
+    def _describe_fields_short(cls, fields_meta, max_fields=6):
+        """Return a short prose sentence listing the most important fields.
+
+        Used in the description paragraph of a function so each menu gets
+        a unique, concrete sentence about what data it contains.
+        """
+        usable = cls._usable_fields(fields_meta)
+        if not usable:
+            return ""
+        # Take only the most important (required first, limit to max_fields)
+        chosen = usable[:max_fields]
+        labels = [m.get("string", fn) for fn, m in chosen]
+        if len(labels) == 1:
+            return "Основное поле: «%s»." % labels[0]
+        if len(labels) == 2:
+            return "Ключевые поля: «%s» и «%s»." % (labels[0], labels[1])
+        return "Ключевые поля: %s и «%s»." % (
+            ", ".join("«%s»" % lbl for lbl in labels[:-1]),
+            labels[-1],
+        )
+
+    @classmethod
+    def _field_step_lines(cls, fields_meta):
+        """Return a list of step-strings, one per visible user field.
+
+        Each step describes the field label, its type and its help text
+        (if available), making the steps fully specific to this model.
+        Required fields are marked with (*).
+        """
+        usable = cls._usable_fields(fields_meta)
+        if not usable:
+            return [
+                "Заполните все необходимые поля формы. "
+                "Названия полей отображаются слева от каждого поля ввода."
+            ]
+        lines = []
+        for fname, fmeta in usable:
+            label = fmeta.get("string") or fname
+            ftype = fmeta.get("type", "")
+            required = fmeta.get("required", False)
+            help_text = (fmeta.get("help") or "").strip()
+            type_hint = cls._type_hint(ftype)
+            req_marker = " (*)" if required else ""
+            # Build a rich step line
+            if help_text:
+                # Trim long help texts to ~120 chars
+                if len(help_text) > 120:
+                    help_text = help_text[:117] + "..."
+                lines.append(
+                    "В поле «%s»%s (%s) — %s" % (label, req_marker, type_hint, help_text)
+                )
+            else:
+                lines.append(
+                    "Заполните поле «%s»%s (%s)." % (label, req_marker, type_hint)
+                )
+        return lines
+
+    # ------------------------------------------------------------------
     # Per-function defaults — user-friendly step-by-step instructions
     # ------------------------------------------------------------------
     @api.model
@@ -170,8 +297,8 @@ class DocTextDefaults(models.AbstractModel):
         """Return user-friendly doc.function values for one documented menu.
 
         Generates plain-language, click-by-click instructions adapted to
-        the menu's view modes and linked model so a non-technical user can
-        follow them immediately.
+        the menu's view modes and actual model field metadata so every menu
+        gets its own unique, concrete description.
         """
         title = menu.name or "Раздел"
         module_name = (
@@ -179,16 +306,26 @@ class DocTextDefaults(models.AbstractModel):
             if menu.doc_module_id
             else "системы"
         )
-        # Build context-aware description from caption or generic fallback.
-        caption_val = getattr(menu, "caption", None)
-        description = (
-            caption_val
-            or (
+        fields_meta = menu.fields_meta_json or {}
+        res_model = menu.res_model or ""
+
+        # --- Description: use caption if set, otherwise build from field metadata ---
+        caption_val = (getattr(menu, "caption", None) or "").strip()
+        if caption_val:
+            description = caption_val
+        elif fields_meta:
+            field_summary = self._describe_fields_short(fields_meta)
+            description = (
+                "Раздел «%s» предназначен для работы с записями модели %s. "
+                "Пользователь может просматривать, создавать, редактировать "
+                "и удалять записи в рамках своих прав доступа. %s"
+            ) % (title, res_model or title, field_summary)
+        else:
+            description = (
                 "Данная функция открывает раздел «%s» и предоставляет "
                 "пользователю доступ к соответствующим данным и операциям "
                 "в системе %s." % (title, module_name)
             )
-        )
 
         requirements = (
             "Пользователь должен быть авторизован в системе.\n"
@@ -196,9 +333,8 @@ class DocTextDefaults(models.AbstractModel):
             "При отсутствии доступа обратитесь к администратору системы." % title
         )
 
-        # Build view-mode-aware steps.
         view_modes = [v.strip() for v in (menu.view_modes or "").split(",") if v.strip()]
-        steps = self._steps_for_menu(title, module_name, view_modes, menu)
+        steps = self._steps_for_menu(title, module_name, view_modes, menu, fields_meta)
 
         result = (
             "Экран раздела «%s» успешно открыт. "
@@ -217,15 +353,18 @@ class DocTextDefaults(models.AbstractModel):
             "screenshot_caption": screenshot_caption,
         }
 
-    @staticmethod
-    def _steps_for_menu(title, module_name, view_modes, menu):
-        """Build detailed step-by-step instructions depending on view modes."""
+    @classmethod
+    def _steps_for_menu(cls, title, module_name, view_modes, menu, fields_meta=None):
+        """Build detailed step-by-step instructions depending on view modes
+        and the menu's actual field metadata.
+        """
         has_list = "list" in view_modes or not view_modes
         has_form = "form" in view_modes
         has_kanban = "kanban" in view_modes
         has_pivot = "pivot" in view_modes
         has_graph = "graph" in view_modes
         has_calendar = "calendar" in view_modes
+        fields_meta = fields_meta or {}
 
         lines = [
             "В главном меню системы найдите и нажмите на раздел «%s»." % module_name,
@@ -259,11 +398,30 @@ class DocTextDefaults(models.AbstractModel):
                 "Чтобы открыть конкретную запись для просмотра или "
                 "редактирования, нажмите на её строку в списке."
             )
-            lines.append(
-                "В открывшейся форме заполните или измените нужные поля. "
-                "Поля, отмеченные звёздочкой (*), являются обязательными."
-            )
-            # Safely access key_fields — field may not exist on older installs
+            if fields_meta:
+                # List required fields specifically
+                req_fields = [
+                    m.get("string", fn)
+                    for fn, m in cls._usable_fields(fields_meta)
+                    if m.get("required")
+                ]
+                if req_fields:
+                    lines.append(
+                        "В открывшейся форме обязательно заполните поля: %s "
+                        "(отмечены звёздочкой *)." %
+                        ", ".join("«%s»" % f for f in req_fields)
+                    )
+                else:
+                    lines.append(
+                        "В открывшейся форме заполните нужные поля. "
+                        "Поля, отмеченные звёздочкой (*), являются обязательными."
+                    )
+            else:
+                lines.append(
+                    "В открывшейся форме заполните или измените нужные поля. "
+                    "Поля, отмеченные звёздочкой (*), являются обязательными."
+                )
+            # Manual key_fields override
             key_fields = (getattr(menu, "key_fields", None) or "").strip()
             if key_fields:
                 lines.append(
@@ -298,33 +456,50 @@ class DocTextDefaults(models.AbstractModel):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Universal create function — works for ANY model
+    # Universal create function — unique per model
     # ------------------------------------------------------------------
     @api.model
     def function_for_create(self, menu, number):
-        """Generate a universal «Создание записи» function for any model/menu.
+        """Generate a unique «Создание записи» function for any model/menu.
 
-        Called automatically from build_functions_from_menus() for every menu
-        that has a form view (i.e. view_modes contains 'form' or is empty).
-        Produces a full click-by-click instruction set that explains how to
-        create a new record, including all key_fields defined on the menu.
-
-        For the legacy news.post model the dedicated function_for_news_create()
-        is still available but this method is the preferred replacement.
+        The description, field steps and result sentence are all derived from
+        the real ORM field metadata stored in ``menu.fields_meta_json``, so
+        every menu produces a distinct, concrete set of instructions.
         """
         title = menu.name or "Раздел"
         module_name = (
             menu.doc_module_id.name if menu.doc_module_id else "системы"
         )
+        fields_meta = menu.fields_meta_json or {}
+        res_model = menu.res_model or ""
 
-        # Human-readable singular noun derived from the menu title.
-        # Strip common plural suffixes so "Новости" → "новость" etc.
         record_label = self._singular_label(title)
 
-        # Collect key fields for per-field description steps.
-        key_fields_raw = (getattr(menu, "key_fields", None) or "").strip()
-        field_steps = self._field_steps(key_fields_raw)
+        # Build description from field metadata when available
+        if fields_meta:
+            field_summary = self._describe_fields_short(fields_meta)
+            description = (
+                "Функция предназначена для создания новой записи в разделе «%s» "
+                "системы %s (модель: %s). "
+                "Пользователь заполняет форму, указывая все необходимые данные, "
+                "после чего сохраняет запись в системе. %s"
+            ) % (title, module_name, res_model or title, field_summary)
+        else:
+            description = (
+                "Функция предназначена для создания новой записи в разделе «%s» "
+                "системы %s. Пользователь заполняет форму, указывая все необходимые "
+                "данные, после чего сохраняет запись в системе." % (title, module_name)
+            )
 
+        requirements = (
+            "Пользователь должен быть авторизован в системе.\n"
+            "Пользователю должен быть предоставлен доступ к разделу «%s» и "
+            "право на создание новых записей. "
+            "При отсутствии доступа обратитесь к администратору системы."
+            % title
+        )
+
+        # Navigation steps
         steps = [
             "В главном меню системы найдите и нажмите на раздел «%s»." % module_name,
             "В открывшемся подменю выберите пункт «%s»." % title,
@@ -332,6 +507,8 @@ class DocTextDefaults(models.AbstractModel):
             "чтобы перейти к форме создания новой записи.",
         ]
 
+        # Per-field steps from real ORM metadata
+        field_steps = self._field_step_lines(fields_meta)
         steps.extend(field_steps)
 
         steps += [
@@ -344,43 +521,29 @@ class DocTextDefaults(models.AbstractModel):
 
         return {
             "name": "Создание записи «%s»" % record_label,
-            "description": (
-                "Функция предназначена для создания новой записи в разделе «%s» "
-                "системы %s. Пользователь заполняет форму, указывая все необходимые "
-                "данные, после чего сохраняет запись в системе." % (title, module_name)
-            ),
-            "requirements": (
-                "Пользователь должен быть авторизован в системе.\n"
-                "Пользователю должен быть предоставлен доступ к разделу «%s» и "
-                "право на создание новых записей. "
-                "При отсутствии доступа обратитесь к администратору системы."
-                % title
-            ),
+            "description": description,
+            "requirements": requirements,
             "steps": "\n".join(steps),
             "result": (
-                "Новая запись успешно создана и сохранена в системе. "
+                "Новая запись «%s» успешно создана и сохранена в системе. "
                 "Запись отображается в списке раздела «%s» и доступна "
-                "для дальнейшего просмотра, редактирования и обработки." % title
+                "для дальнейшего просмотра, редактирования и обработки."
+                % (record_label, title)
             ),
             "screenshot_caption": "Форма создания записи «%s»" % record_label,
         }
 
     @staticmethod
     def _singular_label(menu_title):
-        """Return a best-effort singular lowercase label from a menu title.
-
-        Simple heuristic for common Russian plural endings used in menu names.
-        Falls back to the original title unchanged if no rule matches.
-        """
+        """Return a best-effort singular lowercase label from a menu title."""
         t = (menu_title or "").strip()
         if not t:
             return "запись"
         lower = t.lower()
-        # Common plural → singular mappings (add more as needed)
         replacements = [
-            ("ости", "ость"),   # Новости → Новость
-            ("оты", "ота"),     # Работы → Работа (rare)
-            ("ники", "ник"),    # Документы → keep generic
+            ("ости", "ость"),
+            ("оты", "ота"),
+            ("ники", "ник"),
             ("ументы", "умент"),
             ("заявки", "заявка"),
             ("заказы", "заказ"),
@@ -392,53 +555,21 @@ class DocTextDefaults(models.AbstractModel):
             ("контакты", "контакт"),
             ("договоры", "договор"),
             ("счета", "счёт"),
+            ("комнаты", "комната"),
+            ("залы", "зал"),
+            ("помещения", "помещение"),
+            ("площадки", "площадка"),
+            ("участники", "участник"),
+            ("докладчики", "докладчик"),
+            ("мероприятия", "мероприятие"),
+            ("оборудование", "оборудование"),
+            ("категории", "категория"),
+            ("теги", "тег"),
         ]
         for plural, singular in replacements:
             if lower.endswith(plural):
                 return t[: len(t) - len(plural)] + singular
-        # No rule matched — use the title as-is but lowercase
         return lower
-
-    @staticmethod
-    def _field_steps(key_fields_raw):
-        """Convert a comma/newline-separated key_fields string into step lines.
-
-        Each field entry is expected in one of the formats:
-          • «Field Label» — Description
-          • Field Label — Description
-          • Field Label: Description
-          • Plain field name (no description)
-
-        Returns a list of step strings ready to be joined into the steps text.
-        """
-        if not key_fields_raw:
-            return [
-                "Заполните все необходимые поля формы. "
-                "Названия полей отображаются слева от каждого поля ввода."
-            ]
-
-        # Split by newline or semicolon
-        import re
-        raw_items = re.split(r"[\n;]+", key_fields_raw)
-        steps = []
-        for item in raw_items:
-            item = item.strip().strip(",").strip()
-            if not item:
-                continue
-            # Try to split label from description
-            # Patterns: "Label — Desc", "Label - Desc", "Label: Desc"
-            match = re.match(r"^[«»\"\']?(.+?)[«»\"\']?\s*[—\-:]\s*(.+)$", item)
-            if match:
-                label = match.group(1).strip().strip("«»\"'")
-                desc = match.group(2).strip()
-                steps.append(
-                    "В поле «%s» — %s." % (label, desc[0].lower() + desc[1:])
-                )
-            else:
-                # No description — just instruct to fill the field
-                clean = item.strip("«»\"'")
-                steps.append("Заполните поле «%s»." % clean)
-        return steps
 
     # ------------------------------------------------------------------
     # news.post — dedicated create / edit function (legacy, kept for compat)
@@ -447,36 +578,41 @@ class DocTextDefaults(models.AbstractModel):
     def function_for_news_create(self, menu, number):
         """Generate a dedicated 'Создание новости' function for news.post menus.
 
-        Called automatically from build_functions_from_menus() when the menu's
-        res_model is 'news.post'. Produces a full click-by-click instruction
-        set that explains every visible field on the news form.
-
-        Prefer function_for_create() for new modules — this method is kept
-        for backwards compatibility only.
+        Kept for backwards compatibility. Prefer function_for_create() for
+        new modules — it now uses real ORM metadata automatically.
         """
         module_name = (
             menu.doc_module_id.name if menu.doc_module_id else "DPF News"
         )
+        fields_meta = menu.fields_meta_json or {}
         field_help = self._news_post_field_help(menu)
+
+        # Prefer ORM-driven field steps if metadata is available
+        if fields_meta:
+            field_steps = self._field_step_lines(fields_meta)
+        else:
+            field_steps = [
+                "В поле «Title» введите заголовок новости — он будет отображаться "
+                "на сайте и в списке публикаций.",
+                "В поле «Publication Date» задайте дату публикации материала.",
+                "На вкладке «Content» введите основной текст новости с помощью "
+                "встроенного редактора.",
+                "При необходимости добавьте изображения на вкладке «Images».",
+                "При необходимости настройте параметры отображения галереи "
+                "на вкладке «Gallery Settings».",
+                "Если требуется автоматическая публикация во внешних каналах, "
+                "включите переключатель «Auto-publish to Social Media».",
+                "Поле «Social Status» отображает текущий статус отправки новости "
+                "в социальные сети (например: Partially sent, Sent).",
+                "Убедитесь, что переключатель «Is Published» включён, если новость "
+                "должна быть видна на сайте.",
+            ]
 
         steps = [
             "В главном меню системы найдите и нажмите на раздел «%s»." % module_name,
             "В открывшемся разделе нажмите кнопку «New» (верхний левый угол), "
             "чтобы создать новую новость.",
-            "В поле «Title» введите заголовок новости — он будет отображаться "
-            "на сайте и в списке публикаций.",
-            "В поле «Publication Date» задайте дату публикации материала.",
-            "На вкладке «Content» введите основной текст новости с помощью "
-            "встроенного редактора.",
-            "При необходимости добавьте изображения на вкладке «Images».",
-            "При необходимости настройте параметры отображения галереи "
-            "на вкладке «Gallery Settings».",
-            "Если требуется автоматическая публикация во внешних каналах, "
-            "включите переключатель «Auto-publish to Social Media».",
-            "Поле «Social Status» отображает текущий статус отправки новости "
-            "в социальные сети (например: Partially sent, Sent).",
-            "Убедитесь, что переключатель «Is Published» включён, если новость "
-            "должна быть видна на сайте.",
+        ] + field_steps + [
             "Нажмите кнопку «Сохранить» (значок облака в верхнем левом углу), "
             "чтобы записать новость в систему.",
             "При необходимости нажмите кнопку «Open on Website» для проверки "
@@ -515,12 +651,7 @@ class DocTextDefaults(models.AbstractModel):
 
     @staticmethod
     def _news_post_field_help(menu):
-        """Return a readable summary of key news.post field purposes.
-
-        Scans the menu's key_fields string (if any) and returns the matching
-        human-readable descriptions separated by semicolons. Falls back to the
-        full default set when key_fields is empty.
-        """
+        """Return a readable summary of key news.post field purposes."""
         all_pairs = [
             ("title",                    "«Title» — заголовок новости, отображается на сайте"),
             ("publication date",         "«Publication Date» — дата публикации материала"),
@@ -532,13 +663,9 @@ class DocTextDefaults(models.AbstractModel):
             ("auto-publish",             "«Auto-publish to Social Media» — автоматическая публикация в соцсети"),
             ("visible on current website", "«Visible on current website» — видимость на текущем сайте"),
         ]
-
-        # Safely access key_fields — field may not exist on older installs
         key_fields_lower = (getattr(menu, "key_fields", None) or "").lower()
         if key_fields_lower:
             found = [label for key, label in all_pairs if key in key_fields_lower]
         else:
-            # No key_fields stored — return the full default set
             found = [label for _, label in all_pairs]
-
         return "; ".join(found)

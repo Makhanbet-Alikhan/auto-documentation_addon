@@ -75,7 +75,6 @@ class DocGeneration(models.Model):
             "New Run",
             "",
         }
-        # Only overwrite if name looks like a default / is empty
         if self.name and self.name not in default_names:
             return
 
@@ -222,6 +221,9 @@ class DocGeneration(models.Model):
                 "web_url": node.get("web_url") or False,
                 "caption": caption,
                 "capture_state": "skipped",
+                # Persist full field metadata so text generator can
+                # produce unique per-menu descriptions without re-querying ORM.
+                "fields_meta_json": fields_meta if fields_meta else False,
             })
 
     def _build_models(self, doc_module, module_name, introspector, parser, parsed):
@@ -337,7 +339,6 @@ class DocGeneration(models.Model):
             if func.requirements:
                 lines.append("**\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f:** %s" % func.requirements.strip())
                 lines.append("")
-            # Safe step_lines fallback
             if hasattr(func, 'step_lines') and callable(func.step_lines):
                 try:
                     steps = func.step_lines()

@@ -33,10 +33,24 @@ class DocMenu(models.Model):
         help="Stable client URL the worker navigates to, e.g. /odoo/action-42.",
     )
 
+    # --- Field metadata snapshot ------------------------------------------
+    fields_meta_json = fields.Json(
+        string="Fields Metadata",
+        help=(
+            "Snapshot of fields_get() for res_model at collection time. "
+            "Format: {field_name: {string, help, type, required, relation}}. "
+            "Used by doc.text.defaults to generate per-menu unique field descriptions."
+        ),
+    )
+
     # --- Generated documentation ------------------------------------------
     caption = fields.Text(
         string="Screen Description",
         help="Deterministic (or LLM) description of what the screen shows.",
+    )
+    key_fields = fields.Text(
+        string="Key Fields",
+        help="Optional manual override: comma/newline list of important field labels.",
     )
     screenshot = fields.Binary(string="Screenshot", attachment=True)
     screenshot_filename = fields.Char(string="Screenshot Filename")
