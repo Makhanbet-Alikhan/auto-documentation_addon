@@ -15,13 +15,33 @@ How it works
 3. When matching tasks ARE found:
    a. Module description is filled from the parent task's description.
    b. Subtasks are matched against EXISTING doc.function records by
-      source_task_id (exact) or Jaccard name similarity (fuzzy).
-      If matched -> function enriched IN-PLACE (sequence/position unchanged).
+      source_task_id (exact) or Jaccard name similarity >= 0.25 (fuzzy).
+      If matched  -> function enriched IN-PLACE (sequence/position unchanged).
       If NOT matched -> a new function is created and inserted AFTER the
-      thematically closest existing function (smart sequence placement).
+      LAST function in the same thematic group (smart group-end placement).
       Placement uses a bilingual keyword map so Russian task names are
       correctly matched against English function names.
    c. Menu captions receive a best-effort fill from Jaccard similarity.
+
+Sequence placement algorithm (v6)
+----------------------------------
+When no in-place match exists for a task the enricher must decide WHERE
+to insert the new doc.function so it appears next to related content
+instead of falling to the very end of the document.
+
+Old v5 approach — insert at (best_neighbour.sequence + 5) — caused the
+new function to land in the MIDDLE of an existing thematic group when
+there were several functions sharing the same topic (e.g. multiple
+"Venue" functions).  The fix in v6:
+
+  1. Find the best neighbour (highest _keyword_overlap score).
+  2. Identify the topic keywords that drove that match.
+  3. Walk ALL existing functions; collect those whose _keyword_overlap
+     with the same topic also exceeds the placement threshold.
+  4. The insertion point is (max_sequence_in_group + 10).
+
+This guarantees the new entry always lands AFTER the whole thematic group,
+never in the middle of it.
 """
 import logging
 import re
@@ -33,111 +53,98 @@ _logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r'^\[[\w]+\]\s*', flags=re.UNICODE)
 _NOISE_RE = re.compile(
-    r'\u0422\u0417|\u0422\u0421|\xa7[\d\.]+|\xa7\d|\[.*?\]|["\u00ab\u00bb()/\\,\.\!\?\-\u2013\u2014]',
+    r'\u0422\u0417|\u0422\u0421|\xa7[\d\.]+|\xa7\d|\[.*?\]'
+    r'|["\u00ab\u00bb()/\\,\.\!\?\-\u2013\u2014]',
     flags=re.UNICODE,
 )
 _SECTION_RE = re.compile(
-    r'^\s*(?P<key>\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435|\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f|\u041f\u043e\u0440\u044f\u0434\u043e\u043a|\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442)\s*:?\s*$',
+    r'^\s*(?P<key>\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435'
+    r'|\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f'
+    r'|\u041f\u043e\u0440\u044f\u0434\u043e\u043a'
+    r'|\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442)\s*:?\s*$',
     flags=re.UNICODE | re.IGNORECASE,
 )
 
-# Threshold for in-place matching of a task name to an existing function name.
+# Threshold for in-place matching (Jaccard).
 _FUNC_MATCH_THRESHOLD = 0.25
 
-# Lower threshold used only for smart sequence placement (not for enrichment).
-_PLACEMENT_THRESHOLD = 0.10
+# Placement threshold: any score > 0 counts as "same topic".
+_PLACEMENT_THRESHOLD = 0.0
 
 # ---------------------------------------------------------------------------
-# Bilingual keyword map: Russian words found in task names -> sets of English
-# keywords that may appear in existing (auto-generated) function names.
-#
-# Keys are lowercased Russian words / short phrases.
-# Values are frozensets of lowercased English words.
-#
-# This map is used by _keyword_overlap() so that a Russian task like
-# "Регистрация участников" gets placed next to the "Registrations" function
-# even though Jaccard("регистрация участников", "registrations") == 0.0.
+# Bilingual keyword map: Russian words in task names -> English keywords
+# that may appear in existing (auto-generated) function names.
 # ---------------------------------------------------------------------------
 _KW_MAP: dict[str, frozenset] = {
-    # Events / мероприятия
-    'мероприятие':      frozenset({'event', 'events', 'management', 'router'}),
-    'мероприятия':      frozenset({'event', 'events', 'management'}),
-    'создание':         frozenset({'create', 'creation', 'new', 'event', 'events'}),
-    'управление':       frozenset({'management', 'manage', 'router', 'event'}),
-    'конференц':        frozenset({'event', 'events', 'room', 'rooms'}),
-    'конференции':      frozenset({'event', 'events', 'conference'}),
-    'выставки':         frozenset({'event', 'events', 'exhibition'}),
-    'лекции':           frozenset({'event', 'events', 'lecture'}),
-
-    # Rooms / помещения
-    'помещение':        frozenset({'room', 'rooms', 'venue', 'venues', 'space'}),
-    'помещения':        frozenset({'room', 'rooms', 'venue', 'venues'}),
-    'зал':              frozenset({'room', 'rooms', 'hall', 'venue'}),
-    'рассадка':         frozenset({'seating', 'room', 'rooms', 'venue', 'layout'}),
-    'схема':            frozenset({'layout', 'schema', 'room', 'venue'}),
-    'визуализация':     frozenset({'room', 'venue', 'layout', 'display'}),
-
-    # Venues / площадки
-    'площадка':         frozenset({'venue', 'venues', 'location'}),
-    'площадки':         frozenset({'venue', 'venues', 'location'}),
-    'место':            frozenset({'venue', 'venues', 'location', 'place'}),
-    'места':            frozenset({'venue', 'venues', 'seats', 'location'}),
-    'проведения':       frozenset({'venue', 'venues', 'location', 'event'}),
-
-    # Resources / ресурсы
-    'ресурс':           frozenset({'resource', 'resources', 'equipment'}),
-    'ресурсы':          frozenset({'resource', 'resources', 'equipment'}),
-    'бронирование':     frozenset({'booking', 'reservation', 'resource', 'equipment'}),
-    'пересечений':      frozenset({'conflict', 'overlap', 'resource', 'booking'}),
-    'пересечения':      frozenset({'conflict', 'overlap', 'resource'}),
-    'контроль':         frozenset({'control', 'check', 'resource', 'booking'}),
-
-    # Agenda / программа
-    'программа':        frozenset({'agenda', 'program', 'schedule'}),
-    'программы':        frozenset({'agenda', 'program', 'schedule'}),
-    'регламент':        frozenset({'agenda', 'schedule', 'regulation'}),
-    'выступлений':      frozenset({'agenda', 'speaker', 'speech'}),
-
-    # Equipment / оборудование
-    'оборудование':     frozenset({'equipment', 'gear', 'resource'}),
-    'оборудования':     frozenset({'equipment', 'gear', 'resource'}),
-    'внеплановые':      frozenset({'equipment', 'unplanned', 'ad-hoc'}),
-    'доступность':      frozenset({'availability', 'equipment', 'resource'}),
-
-    # Registrations / регистрации
-    'регистрация':      frozenset({'registration', 'registrations', 'signup'}),
-    'регистрации':      frozenset({'registration', 'registrations', 'signup'}),
-    'участников':       frozenset({'registration', 'registrations', 'participant', 'attendee'}),
-    'участники':        frozenset({'participant', 'attendee', 'registration'}),
-    'роли':             frozenset({'role', 'roles', 'registration', 'access'}),
-    'подтверждение':    frozenset({'confirmation', 'approve', 'registration'}),
-
-    # Notifications / уведомления
-    'уведомления':      frozenset({'notification', 'notifications', 'push', 'email'}),
-    'уведомление':      frozenset({'notification', 'notifications', 'push', 'email'}),
-    'push':             frozenset({'notification', 'push'}),
-    'email':            frozenset({'email', 'notification'}),
-
-    # Media / медиа
-    'медиа':            frozenset({'media', 'gallery', 'photo', 'video'}),
-    'медиагалерея':     frozenset({'media', 'gallery', 'library'}),
-    'фото':             frozenset({'photo', 'image', 'media', 'gallery'}),
-    'видео':            frozenset({'video', 'media', 'gallery'}),
-    'галерея':          frozenset({'gallery', 'media', 'library'}),
-
-    # Analytics / аналитика
-    'аналитика':        frozenset({'analytics', 'report', 'statistics', 'stats'}),
-    'отчёт':            frozenset({'report', 'analytics', 'export'}),
-    'отчет':            frozenset({'report', 'analytics', 'export'}),
-    'статистика':       frozenset({'statistics', 'analytics', 'report'}),
-    'история':          frozenset({'history', 'log', 'order', 'analytics'}),
-    'статус':           frozenset({'status', 'order', 'state'}),
-    'заказов':          frozenset({'order', 'orders', 'history'}),
-
-    # Export / экспорт
-    'экспорт':          frozenset({'export', 'report', 'pdf', 'xlsx'}),
-    'pdf':              frozenset({'pdf', 'report', 'export'}),
-    'xlsx':             frozenset({'xlsx', 'export', 'report'}),
+    # Events
+    'мероприятие':   frozenset({'event', 'events', 'management', 'router'}),
+    'мероприятия':   frozenset({'event', 'events', 'management'}),
+    'создание':      frozenset({'create', 'creation', 'new', 'event', 'events'}),
+    'управление':    frozenset({'management', 'manage', 'router', 'event'}),
+    'конференц':     frozenset({'event', 'events', 'room', 'rooms'}),
+    'конференции':   frozenset({'event', 'events', 'conference'}),
+    'выставки':      frozenset({'event', 'events', 'exhibition'}),
+    'лекции':        frozenset({'event', 'events', 'lecture'}),
+    # Rooms
+    'помещение':     frozenset({'room', 'rooms', 'venue', 'venues', 'space'}),
+    'помещения':     frozenset({'room', 'rooms', 'venue', 'venues'}),
+    'зал':           frozenset({'room', 'rooms', 'hall', 'venue'}),
+    'рассадка':      frozenset({'seating', 'room', 'rooms', 'venue', 'layout'}),
+    'схема':         frozenset({'layout', 'schema', 'room', 'venue'}),
+    'визуализация':  frozenset({'room', 'venue', 'layout', 'display'}),
+    # Venues
+    'площадка':      frozenset({'venue', 'venues', 'location'}),
+    'площадки':      frozenset({'venue', 'venues', 'location'}),
+    'место':         frozenset({'venue', 'venues', 'location', 'place'}),
+    'места':         frozenset({'venue', 'venues', 'seats', 'location'}),
+    'проведения':    frozenset({'venue', 'venues', 'location', 'event'}),
+    # Resources
+    'ресурс':        frozenset({'resource', 'resources', 'equipment'}),
+    'ресурсы':       frozenset({'resource', 'resources', 'equipment'}),
+    'бронирование':  frozenset({'booking', 'reservation', 'resource', 'equipment'}),
+    'пересечений':   frozenset({'conflict', 'overlap', 'resource', 'booking'}),
+    'пересечения':   frozenset({'conflict', 'overlap', 'resource'}),
+    'контроль':      frozenset({'control', 'check', 'resource', 'booking'}),
+    # Agenda
+    'программа':     frozenset({'agenda', 'program', 'schedule'}),
+    'программы':     frozenset({'agenda', 'program', 'schedule'}),
+    'регламент':     frozenset({'agenda', 'schedule', 'regulation'}),
+    'выступлений':   frozenset({'agenda', 'speaker', 'speech'}),
+    # Equipment
+    'оборудование':  frozenset({'equipment', 'gear', 'resource'}),
+    'оборудования':  frozenset({'equipment', 'gear', 'resource'}),
+    'внеплановые':   frozenset({'equipment', 'unplanned', 'ad-hoc'}),
+    'доступность':   frozenset({'availability', 'equipment', 'resource'}),
+    # Registrations
+    'регистрация':   frozenset({'registration', 'registrations', 'signup'}),
+    'регистрации':   frozenset({'registration', 'registrations', 'signup'}),
+    'участников':    frozenset({'registration', 'registrations', 'participant', 'attendee'}),
+    'участники':     frozenset({'participant', 'attendee', 'registration'}),
+    'роли':          frozenset({'role', 'roles', 'registration', 'access'}),
+    'подтверждение': frozenset({'confirmation', 'approve', 'registration'}),
+    # Notifications
+    'уведомления':   frozenset({'notification', 'notifications', 'push', 'email'}),
+    'уведомление':   frozenset({'notification', 'notifications', 'push', 'email'}),
+    'push':          frozenset({'notification', 'push'}),
+    'email':         frozenset({'email', 'notification'}),
+    # Media
+    'медиа':         frozenset({'media', 'gallery', 'photo', 'video'}),
+    'медиагалерея':  frozenset({'media', 'gallery', 'library'}),
+    'фото':          frozenset({'photo', 'image', 'media', 'gallery'}),
+    'видео':         frozenset({'video', 'media', 'gallery'}),
+    'галерея':       frozenset({'gallery', 'media', 'library'}),
+    # Analytics
+    'аналитика':     frozenset({'analytics', 'report', 'statistics', 'stats'}),
+    'отчёт':         frozenset({'report', 'analytics', 'export'}),
+    'отчет':         frozenset({'report', 'analytics', 'export'}),
+    'статистика':    frozenset({'statistics', 'analytics', 'report'}),
+    'история':       frozenset({'history', 'log', 'order', 'analytics'}),
+    'статус':        frozenset({'status', 'order', 'state'}),
+    'заказов':       frozenset({'order', 'orders', 'history'}),
+    # Export
+    'экспорт':       frozenset({'export', 'report', 'pdf', 'xlsx'}),
+    'pdf':           frozenset({'pdf', 'report', 'export'}),
+    'xlsx':          frozenset({'xlsx', 'export', 'report'}),
 }
 
 
@@ -172,16 +179,34 @@ def _jaccard(a, b):
     return len(ta & tb) / len(ta | tb)
 
 
+def _topic_keywords(task_title: str) -> frozenset:
+    """
+    Return the union of all English keyword sets that map from words
+    in task_title via _KW_MAP.  Used to identify the "topic" so we can
+    find the entire thematic group, not just the single best neighbour.
+    """
+    words = _normalize(task_title).split()
+    result: set[str] = set()
+    for word in words:
+        mapped = _KW_MAP.get(word)
+        if mapped:
+            result |= mapped
+    # Also add the normalised task words themselves (handles EN task names)
+    result |= set(words)
+    return frozenset(result)
+
+
 def _keyword_overlap(task_title: str, func_name: str) -> float:
     """
-    Cross-language similarity: translate Russian words in task_title to English
-    keyword sets via _KW_MAP, then measure overlap with func_name tokens.
+    Cross-language similarity score in [0.0, 1.0].
 
-    Returns a score in [0.0, 1.0].  Score > 0 means at least one translated
-    keyword was found in func_name — good enough to be a placement neighbour.
+    1. Try Jaccard first (works for same-language pairs).
+    2. If Jaccard == 0: translate Russian words via _KW_MAP and check
+       how many translated English keywords appear in func_name tokens.
 
-    Jaccard is tried first; if it returns a non-zero value we return that.
-    This function only adds value when Jaccard == 0 (i.e. RU vs EN).
+    Score > 0 means "thematically related" — sufficient for placement.
+    Score always stays below _FUNC_MATCH_THRESHOLD (0.25) for cross-language
+    hits, so keyword-only matches never trigger IN-PLACE enrichment.
     """
     jac = _jaccard(task_title, func_name)
     if jac > 0:
@@ -206,10 +231,40 @@ def _keyword_overlap(task_title: str, func_name: str) -> float:
     if not hits:
         return 0.0
 
-    # Score = proportion of translated keywords that matched, capped at 0.5
-    # (never reaches Jaccard level so in-place matches still dominate).
-    score = min(len(hits) / len(translated), 0.5)
-    return score
+    # Capped at 0.20 — always below _FUNC_MATCH_THRESHOLD so it only
+    # influences placement, never in-place matching.
+    return min(len(hits) / len(translated), 0.20)
+
+
+def _find_group_end(topic_kws: frozenset, existing_funcs: list, skip_threshold: float = 0.0) -> int:
+    """
+    Given a set of topic keywords, find the maximum sequence value among
+    all existing functions whose name shares at least one token with
+    topic_kws (after normalization).
+
+    Returns the max sequence of the thematic group, or -1 if no group found.
+
+    This prevents new functions from being inserted IN THE MIDDLE of a
+    thematic group when several functions share the same topic.
+    """
+    if not topic_kws or not existing_funcs:
+        return -1
+
+    group_max_seq = -1
+    for func in existing_funcs:
+        func_tokens = set(_normalize(func.name or '').split())
+        if not func_tokens:
+            continue
+        overlap = topic_kws & func_tokens
+        if overlap:
+            seq = func.sequence or 0
+            if seq > group_max_seq:
+                group_max_seq = seq
+                _logger.debug(
+                    '_find_group_end: func="%s" seq=%s is in topic group (overlap=%s)',
+                    func.name, seq, overlap,
+                )
+    return group_max_seq
 
 
 # ---------------------------------------------------------------------------
@@ -220,24 +275,26 @@ class DocProjectEnricher(models.AbstractModel):
     """
     Enriches doc.module / doc.menu / doc.function records with project task data.
 
-    Key behaviour (v5)
+    Key behaviour (v6)
     ------------------
     * Each subtask from the project is matched against EXISTING doc.function
       records on the module by:
         1. Exact match on source_task_id  (fast path)
-        2. Jaccard word-overlap >= 0.25 on normalised names
+        2. Jaccard word-overlap >= 0.25 on normalised names  (same-language fuzzy)
 
     * Match found  -> fields (description/requirements/steps/result) are
       written ON THE EXISTING function.  Sequence / number / position
       are NOT changed.
 
-    * No match     -> a new doc.function is created.  Its sequence is
-      computed by _compute_insert_sequence which uses a BILINGUAL keyword
-      map (_KW_MAP) to find the thematically closest existing function even
-      when the task is in Russian and the function name is in English.
-      The new function is inserted AFTER the best neighbour (neighbour.sequence + 5).
-      If no neighbour qualifies, the new function goes after the last existing
-      one (max_seq + 10).
+    * No match     -> a new doc.function is created.
+      Placement uses _compute_insert_sequence (v6) which:
+        a. Finds the best single neighbour via _keyword_overlap.
+        b. Derives the topic keyword set from the task title.
+        c. Walks ALL existing functions to find the LAST one that belongs
+           to the same thematic group (_find_group_end).
+        d. Inserts AFTER the group end (group_end_seq + 10).
+      This ensures new functions always land after the WHOLE group, never
+      in the middle of it.
     """
 
     _name = 'doc.project.enricher'
@@ -252,11 +309,11 @@ class DocProjectEnricher(models.AbstractModel):
         Enrich a single doc.module from project task snapshots.
 
         Returns dict with keys:
-          module_enriched   (bool)
-          menus_enriched    (int)
+          module_enriched    (bool)
+          menus_enriched     (int)
           functions_enriched (int)
-          skipped           (int)
-          reason            (str)
+          skipped            (int)
+          reason             (str)
         """
         stats = {
             'module_enriched': False,
@@ -391,18 +448,17 @@ class DocProjectEnricher(models.AbstractModel):
         return result
 
     # ------------------------------------------------------------------ #
-    # doc.function upsert — IN-PLACE MATCHING + SMART PLACEMENT (v5)     #
+    # doc.function upsert — IN-PLACE MATCHING + SMART GROUP PLACEMENT (v6)#
     # ------------------------------------------------------------------ #
 
     def _upsert_functions_from_snaps(self, doc_module, functional_snaps, overwrite=False):
         """
         Match each subtask snapshot to an existing doc.function by name
-        similarity (Jaccard >= 0.25).  If matched, enrich the existing
-        function IN-PLACE (preserving sequence/position).
+        similarity (Jaccard >= 0.25).  If matched, enrich IN-PLACE
+        (sequence/position unchanged).
 
-        If NOT matched, create a new function inserted AFTER the thematically
-        closest existing function using bilingual keyword matching, so the new
-        entry appears near related content rather than at the very end.
+        If NOT matched, create a new function inserted AFTER THE LAST
+        FUNCTION IN THE THEMATIC GROUP using _compute_insert_sequence (v6).
 
         Returns the count of functions enriched or created.
         """
@@ -411,14 +467,14 @@ class DocProjectEnricher(models.AbstractModel):
 
         existing_funcs = list(doc_module.function_ids)
 
-        # Build an index by source_task_id for exact matches (fast path)
+        # Build index by source_task_id for exact match (fast path)
         existing_by_task_id = {}
         for func in existing_funcs:
             key = getattr(func, 'source_task_id', 0) or 0
             if key:
                 existing_by_task_id[key] = func
 
-        # Compute max sequence for fallback placement (no thematic neighbour)
+        # Max sequence for fallback (no thematic neighbour found)
         max_seq = max((f.sequence or 0 for f in existing_funcs), default=0)
 
         count = 0
@@ -433,22 +489,22 @@ class DocProjectEnricher(models.AbstractModel):
             if not title:
                 continue
 
-            desc = sections.get('description', '').strip()
-            reqs = sections.get('requirements', '').strip()
-            steps = sections.get('steps', '').strip()
-            result_text = sections.get('result', '').strip()
+            desc        = sections.get('description',  '').strip()
+            reqs        = sections.get('requirements', '').strip()
+            steps       = sections.get('steps',        '').strip()
+            result_text = sections.get('result',       '').strip()
 
             if not any([desc, reqs, steps, result_text]):
                 desc = (snap.description_plain or '').strip()
 
             task_id = snap.original_task_id or 0
 
-            # --- Step 1: try exact match by source_task_id ---
+            # --- Step 1: exact match by source_task_id ---
             func = existing_by_task_id.get(task_id)
             if func and func.id in matched_func_ids:
-                func = None  # already used for another snap
+                func = None
 
-            # --- Step 2: try fuzzy match by name (Jaccard >= threshold) ---
+            # --- Step 2: fuzzy match by name (Jaccard only, no cross-lang) ---
             if not func:
                 func = self._match_func_by_name(
                     title, existing_funcs, matched_func_ids,
@@ -456,7 +512,7 @@ class DocProjectEnricher(models.AbstractModel):
                 )
 
             if func:
-                # ENRICH IN-PLACE — do not change sequence / number / position
+                # ENRICH IN-PLACE — never change sequence / number
                 matched_func_ids.add(func.id)
                 updates = {}
                 if (overwrite or not func.description) and desc:
@@ -474,7 +530,7 @@ class DocProjectEnricher(models.AbstractModel):
                     func.write(updates)
                     count += 1
                     _logger.info(
-                        '_upsert_functions: IN-PLACE match  task="%s" -> func="%s" (id=%s)',
+                        '_upsert_functions: IN-PLACE  task="%s" -> func="%s" (id=%s)',
                         title, func.name, func.id,
                     )
                 else:
@@ -483,11 +539,10 @@ class DocProjectEnricher(models.AbstractModel):
                         func.id,
                     )
             else:
-                # No matching function — compute smart sequence placement
-                insert_seq = self._compute_insert_sequence(
-                    title, existing_funcs, max_seq
-                )
-                # Shift all functions that currently have sequence >= insert_seq
+                # No match — compute smart group-end placement
+                insert_seq = self._compute_insert_sequence(title, existing_funcs, max_seq)
+
+                # Shift all functions at or after insert_seq to make room
                 for ef in existing_funcs:
                     if (ef.sequence or 0) >= insert_seq:
                         ef.write({'sequence': (ef.sequence or 0) + 10})
@@ -501,40 +556,41 @@ class DocProjectEnricher(models.AbstractModel):
                 }
                 for field_name, value in [
                     ('requirements', reqs or False),
-                    ('steps', steps or False),
-                    ('result', result_text or False),
+                    ('steps',        steps or False),
+                    ('result',       result_text or False),
                     ('source_task_id', task_id or False),
                 ]:
                     if field_name in self.env['doc.function']._fields:
                         vals[field_name] = value
+
                 new_func = self.env['doc.function'].create(vals)
                 existing_funcs.append(new_func)
                 max_seq = max(max_seq, insert_seq)
                 count += 1
                 _logger.info(
-                    '_upsert_functions: NO MATCH for task="%s" -> created at seq=%s',
+                    '_upsert_functions: NEW FUNC  task="%s"  seq=%s',
                     title, insert_seq,
                 )
 
         _logger.info(
-            '_upsert_functions_from_snaps: module=%s  enriched/created %s functions',
+            '_upsert_functions_from_snaps: module=%s  enriched/created=%s',
             doc_module.technical_name, count,
         )
         return count
 
     def _compute_insert_sequence(self, task_title: str, existing_funcs: list, max_seq: int) -> int:
         """
-        Find the best thematic neighbour among existing functions and return
-        a sequence value that places the new function AFTER it.
+        Compute sequence for a new function so it lands AFTER the entire
+        thematic group that best matches the task title.
 
-        Strategy (in order):
-        1. _keyword_overlap() — bilingual RU->EN keyword map + Jaccard.
-           Works even when task is Russian and function names are English.
-        2. Falls back to max_seq + 10 if no neighbour scores > 0.
+        Algorithm (v6)
+        --------------
+        1. Find the single best-scoring neighbour via _keyword_overlap.
+        2. Derive the topic keyword set (_topic_keywords) from task_title.
+        3. Find the LAST function in that topic group (_find_group_end).
+        4. Insert at group_end + 10.
 
-        The threshold is intentionally very low (> 0) so that any single
-        keyword hit is enough to establish a neighbourhood.  This prevents
-        functions from falling to the bottom of the document.
+        Falls back to max_seq + 10 when no thematic neighbour is found.
         """
         best_func = None
         best_score = 0.0
@@ -545,28 +601,40 @@ class DocProjectEnricher(models.AbstractModel):
                 best_score = score
                 best_func = func
 
-        if best_func and best_score > 0:
-            neighbour_seq = best_func.sequence or 0
-            insert_seq = neighbour_seq + 5
+        if not best_func or best_score <= _PLACEMENT_THRESHOLD:
+            fallback = max_seq + 10
             _logger.debug(
-                '_compute_insert_sequence: "%s" -> neighbour="%s" (seq=%s score=%.2f) -> insert at %s',
-                task_title, best_func.name, neighbour_seq, best_score, insert_seq,
+                '_compute_insert_sequence: "%s" -> no neighbour, fallback seq=%s',
+                task_title, fallback,
             )
-            return insert_seq
+            return fallback
 
-        fallback = max_seq + 10
+        # Derive the topic keyword set from the task title
+        topic_kws = _topic_keywords(task_title)
+
+        # Find the LAST function in the thematic group
+        group_end_seq = _find_group_end(topic_kws, existing_funcs)
+
+        if group_end_seq < 0:
+            # _find_group_end found nothing — fall back to best neighbour seq
+            group_end_seq = best_func.sequence or 0
+
+        insert_seq = group_end_seq + 10
         _logger.debug(
-            '_compute_insert_sequence: "%s" -> no neighbour found, fallback seq=%s',
-            task_title, fallback,
+            '_compute_insert_sequence: "%s" -> best_neighbour="%s" '
+            'group_end_seq=%s -> insert at %s',
+            task_title, best_func.name, group_end_seq, insert_seq,
         )
-        return fallback
+        return insert_seq
 
     def _match_func_by_name(self, task_title, existing_funcs, already_matched, threshold):
         """
-        Find the best-matching doc.function for a task title.
+        Find the best-matching doc.function for a task title using Jaccard
+        word-overlap on normalised names.
 
-        Uses Jaccard word-overlap on normalised names.  The candidate with the
-        highest score above `threshold` that has not been matched yet is returned.
+        Only same-language pairs (both RU or both EN) benefit from this;
+        cross-language matching is intentionally NOT done here — use
+        _keyword_overlap for placement only.
         """
         best_func = None
         best_score = 0.0
@@ -625,12 +693,12 @@ class DocProjectEnricher(models.AbstractModel):
         best_snap = None
         best_score = 0.0
         for snap in snaps:
-            raw = snap.name or ''
+            raw   = snap.name or ''
             clean = snap.name_clean or _clean_tag(raw)
             score = max(_jaccard(raw, name), _jaccard(clean, name))
             if score > best_score:
                 best_score = score
-                best_snap = snap
+                best_snap  = snap
         if best_snap and best_score >= threshold:
             return best_snap, best_score
         return None, 0.0
@@ -664,8 +732,8 @@ class DocProjectEnricher(models.AbstractModel):
           Порядок    -> 'steps'
           Результат  -> 'result'
 
-        Lines that start with «ЧТО СДЕЛАТЬ» (or any header not in the map)
-        are discarded — they are implementation notes, not documentation content.
+        Lines under «ЧТО СДЕЛАТЬ» / «ЧТО НУЖНО СДЕЛАТЬ» are discarded
+        — they are implementation notes, not documentation content.
         """
         result = {'description': '', 'requirements': '', 'steps': '', 'result': ''}
         if not plain_text:
@@ -687,9 +755,9 @@ class DocProjectEnricher(models.AbstractModel):
             flags=re.UNICODE | re.IGNORECASE,
         )
 
-        current_key = 'description'
+        current_key  = 'description'
         discard_mode = False
-        buckets = {k: [] for k in result}
+        buckets      = {k: [] for k in result}
 
         for line in plain_text.splitlines():
             m = _SECTION_DETECT.match(line)
@@ -700,7 +768,7 @@ class DocProjectEnricher(models.AbstractModel):
                     continue
                 mapped = _KEY_MAP.get(raw_key)
                 if mapped:
-                    current_key = mapped
+                    current_key  = mapped
                     discard_mode = False
                     continue
                 if discard_mode:
