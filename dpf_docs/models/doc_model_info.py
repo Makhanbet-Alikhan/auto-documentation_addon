@@ -1,25 +1,49 @@
 # -*- coding: utf-8 -*-
-"""Stored documentation for a single model used by a module."""
+"""doc.model.info — stores introspected model metadata for documentation.
+
+Fields added in v7:
+  - business_logic_text : Plain-language description of workflow/buttons
+  - is_primary          : True for the module's primary (main) model
+"""
 from odoo import fields, models
 
 
 class DocModelInfo(models.Model):
     _name = "doc.model.info"
-    _description = "Auto Doc - Documented Model"
-    _order = "technical_name"
+    _description = "Auto Doc - Model Information"
+    _order = "is_primary desc, display_name asc"
 
     doc_module_id = fields.Many2one(
-        "doc.module", string="Documentation", required=True, ondelete="cascade"
+        "doc.module",
+        string="Модуль",
+        ondelete="cascade",
+        required=True,
+        index=True,
     )
-    technical_name = fields.Char(
-        string="Technical Name", required=True,
-        help="The ORM model name, e.g. res.partner.",
+    technical_name = fields.Char(string="Техническое имя", required=True)
+    display_name = fields.Char(string="Название")
+    description = fields.Text(string="Описание")
+    field_table_json = fields.Json(
+        string="Поля (только пользовательские)",
+        help=(
+            "JSON-список полей, которые пользователь заполняет на форме. "
+            "Системные, вычисляемые и readonly-поля исключены."
+        ),
     )
-    display_name = fields.Char(string="Display Name")
-    description = fields.Text(
-        string="Description",
-        help="Composed from the model class docstring and field comments.",
+    field_count = fields.Integer(string="Кол-во полей")
+
+    business_logic_text = fields.Text(
+        string="Бизнес-логика",
+        help=(
+            "Описание автоматического поведения системы: "
+            "статусы записи, доступные кнопки действий."
+        ),
     )
-    # The full field table stored as JSON for the renderer to iterate over.
-    field_table_json = fields.Json(string="Field Table")
-    field_count = fields.Integer(string="Field Count", default=0)
+
+    is_primary = fields.Boolean(
+        string="Основная модель",
+        default=False,
+        help=(
+            "True для главной модели модуля. Определяется автоматически."
+        ),
+    )

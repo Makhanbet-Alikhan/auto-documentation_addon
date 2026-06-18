@@ -1,80 +1,70 @@
 # -*- coding: utf-8 -*-
-"""Stored documentation for a single menu / screen.
+"""doc.menu — represents a single menu/screen in the documented module.
 
-One ``doc.menu`` record represents one node in the module's menu tree. Leaf
-nodes that carry a window action are the ones the Playwright worker will
-screenshot; the captured image is stored in :attr:`screenshot`.
+v7 additions:
+  - groups_info: comma-separated list of access groups (roles) for this screen
 """
 from odoo import fields, models
 
 
 class DocMenu(models.Model):
     _name = "doc.menu"
-    _description = "Auto Doc - Documented Menu / Screen"
-    _order = "sequence, id"
+    _description = "Auto Doc - Menu / Screen"
+    _order = "sequence asc, id asc"
 
     doc_module_id = fields.Many2one(
-        "doc.module", string="Documentation", required=True, ondelete="cascade"
+        "doc.module",
+        string="Модуль",
+        ondelete="cascade",
+        required=True,
+        index=True,
     )
-
-    # --- Identity ----------------------------------------------------------
-    menu_xmlid = fields.Char(string="Menu Path")
-    name = fields.Char(string="Menu Name", required=True)
-    complete_name = fields.Char(string="Full Path")
-    sequence = fields.Integer(string="Sequence", default=10)
-
-    # --- Action / view info ------------------------------------------------
-    odoo_menu_id = fields.Integer(string="Odoo Menu ID")
-    action_id = fields.Integer(string="Action ID")
-    res_model = fields.Char(string="Target Model")
-    view_modes = fields.Char(string="View Modes")
-    web_url = fields.Char(
-        string="Web URL",
-        help="Stable client URL the worker navigates to, e.g. /odoo/action-42.",
-    )
-
-    # --- Field metadata snapshot ------------------------------------------
-    fields_meta_json = fields.Json(
-        string="Fields Metadata",
-        help=(
-            "Snapshot of fields_get() for res_model at collection time. "
-            "Format: {field_name: {string, help, type, required, relation}}. "
-            "Used by doc.text.defaults to generate per-menu unique field descriptions."
-        ),
-    )
-
-    # --- Generated documentation ------------------------------------------
+    name = fields.Char(string="Название меню", required=True)
+    complete_name = fields.Char(string="Полный путь")
+    menu_xmlid = fields.Char(string="XML ID")
+    sequence = fields.Integer(string="Порядок", default=10)
+    odoo_menu_id = fields.Integer(string="ID меню Odoo")
+    action_id = fields.Integer(string="ID действия")
+    res_model = fields.Char(string="Модель")
+    view_modes = fields.Char(string="Режимы просмотра")
+    web_url = fields.Char(string="URL")
     caption = fields.Text(
-        string="Screen Description",
-        help="Deterministic (or LLM) description of what the screen shows.",
+        string="Описание экрана",
+        help="Автоматически сгенерированное описание для пользователей.",
     )
-    key_fields = fields.Text(
-        string="Key Fields",
-        help="Optional manual override: comma/newline list of important field labels.",
+    caption_source = fields.Selection(
+        [
+            ("generated", "Сгенерировано"),
+            ("task",      "Из задачи проекта"),
+            ("manual",    "Вручную"),
+        ],
+        string="Источник описания",
+        default="generated",
     )
-    screenshot = fields.Binary(string="Screenshot", attachment=True)
-    screenshot_filename = fields.Char(string="Screenshot Filename")
-
-    # --- Worker bookkeeping -----------------------------------------------
+    caption_task_name_snapshot = fields.Char(
+        string="Задача-источник",
+        help="Название задачи из снапшота, из которой взято описание.",
+    )
     capture_state = fields.Selection(
         [
-            ("pending", "Pending"),
-            ("captured", "Captured"),
-            ("skipped", "Skipped (no action)"),
-            ("error", "Error"),
+            ("pending",  "Ожидает"),
+            ("done",     "Готово"),
+            ("skipped",  "Пропущено"),
+            ("error",    "Ошибка"),
         ],
-        string="Capture State",
-        default="pending",
+        string="Статус скриншота",
+        default="skipped",
     )
-    capture_error = fields.Char(string="Capture Error")
+    screenshot = fields.Binary(string="Скриншот")
+    fields_meta_json = fields.Json(
+        string="Метаданные полей (пользовательские)",
+        help="Только поля, которые пользователь заполняет на форме.",
+    )
 
-    def to_task_dict(self):
-        """Serialise this menu into a screenshot task for the worker."""
-        self.ensure_one()
-        return {
-            "doc_menu_id": self.id,
-            "name": self.name,
-            "web_url": self.web_url,
-            "res_model": self.res_model,
-            "view_modes": (self.view_modes or "").split(",") if self.view_modes else [],
-        }
+    groups_info = fields.Char(
+        string="Роли доступа",
+        help=(
+            "Группы пользователей Odoo, которым доступен этот экран. "
+            "Заполняется автоматически из настроек меню и действий."
+        ),
+    )
