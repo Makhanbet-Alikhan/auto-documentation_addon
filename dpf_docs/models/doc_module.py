@@ -22,6 +22,12 @@ class DocModule(models.Model):
     )
     description = fields.Text(string="Module Description")
 
+    # Primary model detected by introspector (most FK-referenced model)
+    primary_model = fields.Char(
+        string="Primary Model",
+        help="Technical name of the main model of this module (auto-detected).",
+    )
+
     # --- User-manual metadata ---
     system_name = fields.Char(string="System Name")
     manual_version = fields.Char(string="Manual Version", default="1.0")
@@ -176,7 +182,7 @@ class DocModule(models.Model):
         ]
 
     def action_render_markdown(self):
-        """Recompute Markdown. Uses a job-based approach to avoid timeout."""
+        """Recompute Markdown."""
         self.ensure_one()
         try:
             md = self.env["doc.generation"]._render_markdown(self)
@@ -201,14 +207,14 @@ class DocModule(models.Model):
             "tag": "display_notification",
             "params": {
                 "title": _("Markdown"),
-                "message": _("Markdown сгенерирован."),
+                "message": _("Маркдаун сгенерирован."),
                 "type": "success",
                 "sticky": False,
             },
         }
 
     def action_enrich_from_snapshot(self):
-        """Кнопка: обогатить этот модуль из снапшота проекта."""
+        """Button: enrich this module from the project snapshot."""
         self.ensure_one()
         generation = self.generation_id
         if not generation or not generation.snapshot_set_id:
