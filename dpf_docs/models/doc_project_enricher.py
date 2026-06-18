@@ -14,11 +14,11 @@ How it works
 
 3. When matching tasks ARE found:
    a. Module description is filled from the parent task's description.
-   b. Child tasks (subtasks) -> matched against EXISTING doc.function records
-      by name similarity (Jaccard).  If a good match is found the existing
-      function is ENRICHED IN-PLACE (description / steps / result fields
-      are filled without changing sequence or position).  If no match is found
-      a new doc.function is created at the very end.
+   b. Subtasks are matched against EXISTING doc.function records by
+      source_task_id (exact) or Jaccard name similarity (fuzzy).
+      If matched -> function enriched IN-PLACE (sequence/position unchanged).
+      If NOT matched -> a new function is created and inserted AFTER the
+      thematically closest existing function (smart sequence placement).
    c. Menu captions receive a best-effort fill from Jaccard similarity.
 """
 import logging
@@ -39,11 +39,12 @@ _SECTION_RE = re.compile(
     flags=re.UNICODE | re.IGNORECASE,
 )
 
-# Threshold for matching a task name to an existing function name.
-# 0.25 means at least 25% word overlap — enough to match
-# "[dpf_events] Rooms" with function "Просмотр списка комнат" when
-# both have a shared keyword, but not so low as to cause false positives.
+# Threshold for in-place matching of a task name to an existing function name.
 _FUNC_MATCH_THRESHOLD = 0.25
+
+# Lower threshold used only for smart sequence placement (not for enrichment).
+# We want to find the "closest neighbour" to insert after, even if overlap is weak.
+_PLACEMENT_THRESHOLD = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -85,19 +86,25 @@ class DocProjectEnricher(models.AbstractModel):
     """
     Enriches doc.module / doc.menu / doc.function records with project task data.
 
-    Key behaviour (v3)
+    Key behaviour (v4)
     ------------------
     * Each subtask from the project is matched against EXISTING doc.function
-      records on the module by Jaccard word-overlap between the task title and
-      the function name.  Match threshold: 0.25.
+      records on the module by:
+        1. Exact match on source_task_id  (fast path)
+        2. Jaccard word-overlap >= 0.25 on normalised names
 
-    * If a match is found  -> fields (description/requirements/steps/result)
-      are written ON THE EXISTING function.  The function keeps its original
-      sequence/number/position in the document.
+    * Match found  -> fields (description/requirements/steps/result) are
+      written ON THE EXISTING function.  Sequence / number / position
+      are NOT changed.
 
-    * If no match is found -> a new doc.function is created.  Its sequence is
-      set to max(existing sequences) + 10 so it appears after all auto-generated
-      functions.  This case is the FALLBACK, not the main path.
+    * No match     -> a new doc.function is created.  Its sequence is
+      computed by finding the thematically closest existing function
+      (highest Jaccard score >= 0.10) and inserting AFTER it
+      (neighbour.sequence + 5).  If no neighbour qualifies, the new
+      function goes after the last existing one (max_seq + 10).
+
+      This means unmatched tasks are placed thematically, not dumped at
+      the bottom of the document.
     """
 
     _name = 'doc.project.enricher'
@@ -251,15 +258,18 @@ class DocProjectEnricher(models.AbstractModel):
         return result
 
     # ------------------------------------------------------------------ #
-    # doc.function upsert — IN-PLACE MATCHING (v3)                       #
+    # doc.function upsert — IN-PLACE MATCHING + SMART PLACEMENT (v4)     #
     # ------------------------------------------------------------------ #
 
     def _upsert_functions_from_snaps(self, doc_module, functional_snaps, overwrite=False):
         """
         Match each subtask snapshot to an existing doc.function by name
         similarity (Jaccard >= 0.25).  If matched, enrich the existing
-        function IN-PLACE (preserving sequence/position).  If not matched,
-        create a new function appended after existing ones.
+        function IN-PLACE (preserving sequence/position).
+
+        If NOT matched, create a new function inserted AFTER the thematically
+        closest existing function (Jaccard >= 0.10), so the new entry appears
+        near related content rather than at the very end.
 
         Returns the count of functions enriched or created.
         """
@@ -275,7 +285,7 @@ class DocProjectEnricher(models.AbstractModel):
             if key:
                 existing_by_task_id[key] = func
 
-        # Compute max sequence for fallback new-function placement
+        # Compute max sequence for fallback placement (no thematic neighbour)
         max_seq = max((f.sequence or 0 for f in existing_funcs), default=0)
 
         count = 0
@@ -283,7 +293,7 @@ class DocProjectEnricher(models.AbstractModel):
         # function is not enriched twice from different tasks.
         matched_func_ids = set()
 
-        for idx, snap in enumerate(functional_snaps, start=1):
+        for snap in functional_snaps:
             sections = self._parse_subtask_sections(
                 (snap.description_plain or '').strip()
             )
@@ -307,7 +317,7 @@ class DocProjectEnricher(models.AbstractModel):
             if func and func.id in matched_func_ids:
                 func = None  # already used for another snap
 
-            # --- Step 2: try fuzzy match by name (Jaccard) ---
+            # --- Step 2: try fuzzy match by name (Jaccard >= threshold) ---
             if not func:
                 func = self._match_func_by_name(
                     title, existing_funcs, matched_func_ids,
@@ -326,7 +336,6 @@ class DocProjectEnricher(models.AbstractModel):
                     updates['steps'] = steps
                 if (overwrite or not getattr(func, 'result', None)) and result_text:
                     updates['result'] = result_text
-                # Also store the source_task_id for future exact-match passes
                 if task_id and 'source_task_id' in self.env['doc.function']._fields:
                     if not (getattr(func, 'source_task_id', 0) or 0):
                         updates['source_task_id'] = task_id
@@ -343,13 +352,24 @@ class DocProjectEnricher(models.AbstractModel):
                         func.id,
                     )
             else:
-                # No matching function found — create new at the end
-                max_seq += 10
+                # No matching function — compute smart sequence placement
+                insert_seq = self._compute_insert_sequence(
+                    title, existing_funcs, max_seq
+                )
+                # Shift all functions that currently have sequence >= insert_seq
+                # to make room (gap of 10) so the new function fits cleanly.
+                for ef in existing_funcs:
+                    if (ef.sequence or 0) >= insert_seq:
+                        ef.write({'sequence': (ef.sequence or 0) + 10})
+
                 vals = {
                     'doc_module_id': doc_module.id,
                     'name': title,
-                    'sequence': max_seq,
+                    'sequence': insert_seq,
                     'description': desc or False,
+                    # Mark as project-sourced so the export knows to render
+                    # only the description block (no placeholder screenshot).
+                    'source': 'project',
                 }
                 for field_name, value in [
                     ('requirements', reqs or False),
@@ -359,11 +379,14 @@ class DocProjectEnricher(models.AbstractModel):
                 ]:
                     if field_name in self.env['doc.function']._fields:
                         vals[field_name] = value
-                self.env['doc.function'].create(vals)
+                new_func = self.env['doc.function'].create(vals)
+                existing_funcs.append(new_func)
+                # Update max_seq in case there are multiple unmatched tasks
+                max_seq = max(max_seq, insert_seq)
                 count += 1
                 _logger.info(
-                    '_upsert_functions: NO MATCH for task="%s" -> created new function',
-                    title,
+                    '_upsert_functions: NO MATCH for task="%s" -> created at seq=%s',
+                    title, insert_seq,
                 )
 
         _logger.info(
@@ -371,6 +394,38 @@ class DocProjectEnricher(models.AbstractModel):
             doc_module.technical_name, count,
         )
         return count
+
+    def _compute_insert_sequence(self, task_title, existing_funcs, max_seq):
+        """
+        Find the best thematic neighbour among existing functions and return
+        a sequence value that places the new function AFTER it.
+
+        If no neighbour scores >= _PLACEMENT_THRESHOLD, fall back to
+        max_seq + 10 (append at end, before Literature/Glossary).
+        """
+        best_func = None
+        best_score = 0.0
+        for func in existing_funcs:
+            score = _jaccard(task_title, func.name or '')
+            if score > best_score:
+                best_score = score
+                best_func = func
+
+        if best_func and best_score >= _PLACEMENT_THRESHOLD:
+            neighbour_seq = best_func.sequence or 0
+            insert_seq = neighbour_seq + 5
+            _logger.debug(
+                '_compute_insert_sequence: "%s" -> neighbour="%s" (seq=%s score=%.2f) -> insert at %s',
+                task_title, best_func.name, neighbour_seq, best_score, insert_seq,
+            )
+            return insert_seq
+
+        fallback = max_seq + 10
+        _logger.debug(
+            '_compute_insert_sequence: "%s" -> no neighbour found, fallback seq=%s',
+            task_title, fallback,
+        )
+        return fallback
 
     def _match_func_by_name(self, task_title, existing_funcs, already_matched, threshold):
         """
@@ -472,10 +527,13 @@ class DocProjectEnricher(models.AbstractModel):
         Split plain text into structured documentation sections.
 
         Recognised Russian section headers (case-insensitive):
-          \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435   -> 'description'
-          \u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f -> 'requirements'
-          \u041f\u043e\u0440\u044f\u0434\u043e\u043a    -> 'steps'
-          \u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442  -> 'result'
+          Описание   -> 'description'
+          Требования -> 'requirements'
+          Порядок    -> 'steps'
+          Результат  -> 'result'
+
+        Lines that start with «ЧТО СДЕЛАТЬ» (or any header not in the map)
+        are discarded — they are implementation notes, not documentation content.
         """
         result = {'description': '', 'requirements': '', 'steps': '', 'result': ''}
         if not plain_text:
@@ -487,15 +545,41 @@ class DocProjectEnricher(models.AbstractModel):
             '\u043f\u043e\u0440\u044f\u0434\u043e\u043a': 'steps',
             '\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442': 'result',
         }
+        # Section headers that mark content we must DISCARD (not include in docs)
+        _DISCARD_HEADERS = {
+            '\u0447\u0442\u043e \u0441\u0434\u0435\u043b\u0430\u0442\u044c',  # ЧТО СДЕЛАТЬ
+            '\u0447\u0442\u043e \u043d\u0443\u0436\u043d\u043e \u0441\u0434\u0435\u043b\u0430\u0442\u044c',
+        }
+
+        _SECTION_DETECT = re.compile(
+            r'^\s*(?P<key>[^\n:]{2,40})\s*:?\s*$',
+            flags=re.UNICODE | re.IGNORECASE,
+        )
+
         current_key = 'description'
+        discard_mode = False
         buckets = {k: [] for k in result}
 
         for line in plain_text.splitlines():
-            m = _SECTION_RE.match(line)
+            m = _SECTION_DETECT.match(line)
             if m:
-                current_key = _KEY_MAP.get(m.group('key').lower(), 'description')
-            else:
-                buckets[current_key].append(line)
+                raw_key = m.group('key').strip().lower()
+                if raw_key in _DISCARD_HEADERS:
+                    discard_mode = True
+                    continue
+                mapped = _KEY_MAP.get(raw_key)
+                if mapped:
+                    current_key = mapped
+                    discard_mode = False
+                    continue
+                # Unknown header — could be a subsection within description;
+                # keep it unless we're in discard mode.
+                if discard_mode:
+                    continue
+
+            if discard_mode:
+                continue
+            buckets[current_key].append(line)
 
         for k, bucket in buckets.items():
             result[k] = '\n'.join(bucket).strip()
