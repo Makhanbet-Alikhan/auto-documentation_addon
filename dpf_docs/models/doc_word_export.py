@@ -8,15 +8,19 @@ Generates a complete Russian-language user manual in Word format:
 * 1. Введение (1.1 Категории, 1.2 Область, 1.3 Назначение, 1.4 Соглашения)
 * 2. Содержание документа (2.1 Назначение, 2.2 Материалы, 2.3 Подготовка)
 * 3. Список функций — one block per function:
-    Функция N: <title>
-    source='auto'    -> Описание / Требования / Порядок / screenshot or placeholder / Результат
-    source='project' -> Описание only (no placeholder, no empty sections)
+    source='auto'    -> full render: Описание / Требования / Порядок / screenshot / Результат
+                        If a source='project' function follows immediately and has
+                        a description, that text is appended to the Описание paragraph
+                        of the auto function so the context stays together.
+    source='project' -> if no preceding auto function absorbed it, rendered as a
+                        short italic note (no heading, no bold label) to avoid
+                        polluting the document structure.
 * 4. Литература
 * 5. Словарь терминов
 
 Function and figure numbers are assigned by a single sequential counter
 that spans all functions regardless of source, guaranteeing correct
-сквозной (квозной) numeration across the whole document.
+сквозной numeration across the whole document.
 
 ``python-docx`` is loaded lazily so the addon still installs without it;
 the Word button then raises a clear, actionable error.
@@ -279,9 +283,9 @@ class DocWordExport(models.AbstractModel):
             mod_name = doc_module.name or doc_module.technical_name
             self._heading(document, "3.%d. %s" % (sub, mod_name), 2)
 
-            funcs = doc_module.function_ids.sorted(
+            funcs = list(doc_module.function_ids.sorted(
                 key=lambda f: ((f.sequence or 999999), f.id)
-            )
+            ))
             if not funcs:
                 p = document.add_paragraph()
                 r = p.add_run("Функции для данного модуля не сформированы.")
@@ -289,25 +293,67 @@ class DocWordExport(models.AbstractModel):
                 r.italic = True
                 continue
 
+            # ----------------------------------------------------------
+            # Pre-pass: group project descriptions into their predecessor
+            # auto function so they render inline instead of standalone.
+            #
+            # Strategy:
+            #   - Walk the sorted list once.
+            #   - When we hit a source='project' func, look back for the
+            #     most recent source='auto' func in the same module and
+            #     attach the description there.
+            #   - If no auto predecessor exists, keep it in the list for
+            #     standalone rendering (as a compact italic note).
+            # ----------------------------------------------------------
+            # Map: auto_func.id -> list of project descriptions to append
+            extra_descs = {}   # {auto_func_id: [str, ...]}
+            orphan_projects = []  # project funcs with no auto predecessor
+            last_auto = None
+
             for func in funcs:
+                src = (getattr(func, 'source', 'auto') or 'auto')
+                if src != 'project':
+                    last_auto = func
+                else:
+                    desc = (func.description or '').strip()
+                    if not desc:
+                        continue  # nothing to show, skip silently
+                    if last_auto is not None:
+                        extra_descs.setdefault(last_auto.id, []).append(desc)
+                    else:
+                        orphan_projects.append(func)
+
+            # Render auto functions (with inline project descriptions)
+            for func in funcs:
+                src = (getattr(func, 'source', 'auto') or 'auto')
+                if src == 'project':
+                    continue  # handled inline or as orphan below
                 func_counter[0] += 1
+                appended = extra_descs.get(func.id, [])
                 self._add_function(
                     document, func,
                     func_num=func_counter[0],
                     figure_counter=figure_counter,
+                    extra_descriptions=appended,
                 )
 
-    def _add_function(self, document, func, func_num, figure_counter):
+            # Render orphan project functions (no auto predecessor)
+            for func in orphan_projects:
+                self._add_orphan_project_function(document, func)
+
+    def _add_function(self, document, func, func_num, figure_counter,
+                      extra_descriptions=None):
         """
-        Render one function block.
+        Render one auto function block.
 
         Parameters
         ----------
-        func_num      : sequential 1-based function number for this document
-        figure_counter: list([int]) — mutable counter shared across all functions;
-                        updated in-place when a figure is emitted
+        func_num           : sequential 1-based function number
+        figure_counter     : list([int]) — mutable counter, updated in-place
+        extra_descriptions : list of str — project task descriptions to append
+                             to the Описание paragraph of this function
         """
-        is_project = (getattr(func, 'source', 'auto') or 'auto') == 'project'
+        extra_descriptions = extra_descriptions or []
 
         # --- Функция N: Title ---
         title_p = document.add_paragraph()
@@ -316,54 +362,72 @@ class DocWordExport(models.AbstractModel):
         r.bold = True
         r.font.size = Pt(12)
 
-        if is_project:
-            # ---- Project-sourced function: description only ----
-            # Do NOT emit Требования / Порядок / screenshot placeholder / Результат.
-            # Only emit Описание if there is actual content.
-            self._labelled(document, "Описание:", func.description)
-            # If a real screenshot was manually attached, still show it.
-            if func.screenshot:
-                figure_counter[0] = self._embed_screenshot(
-                    document, func, figure_counter[0]
-                )
+        # --- Описание (auto text + any project enrichments inline) ---
+        desc_parts = []
+        if func.description and func.description.strip():
+            desc_parts.append(func.description.strip())
+        for extra in extra_descriptions:
+            if extra:
+                desc_parts.append(extra)
+
+        if desc_parts:
+            p = document.add_paragraph()
+            lbl = p.add_run("Описание: ")
+            lbl.bold = True
+            p.add_run("\n".join(desc_parts))
+
+        # --- Требования (red text) ---
+        if func.requirements and func.requirements.strip():
+            p = document.add_paragraph()
+            lbl = p.add_run("Требования: ")
+            lbl.bold = True
+            val = p.add_run(func.requirements.strip())
+            val.font.color.rgb = _red()
+
+        # --- Порядок выполнения ---
+        steps = func.step_lines() if hasattr(func, "step_lines") else []
+        if steps:
+            p = document.add_paragraph()
+            p.add_run("Порядок выполнения:").bold = True
+            for idx, step in enumerate(steps, 1):
+                sp = document.add_paragraph()
+                sp.paragraph_format.left_indent = Pt(18)
+                sp.add_run("%d. %s" % (idx, step))
+
+        # --- Screenshot or placeholder ---
+        if func.screenshot:
+            figure_counter[0] = self._embed_screenshot(
+                document, func, figure_counter[0]
+            )
         else:
-            # ---- Auto-generated function: full render ----
-            self._labelled(document, "Описание:", func.description)
+            figure_counter[0] = self._add_screenshot_placeholder(
+                document, func, figure_counter[0]
+            )
 
-            # Требования (red text)
-            if func.requirements and func.requirements.strip():
-                p = document.add_paragraph()
-                lbl = p.add_run("Требования: ")
-                lbl.bold = True
-                val = p.add_run(func.requirements.strip())
-                val.font.color.rgb = _red()
-
-            # Порядок выполнения
-            steps = func.step_lines() if hasattr(func, "step_lines") else []
-            if steps:
-                p = document.add_paragraph()
-                p.add_run("Порядок выполнения:").bold = True
-                for idx, step in enumerate(steps, 1):
-                    sp = document.add_paragraph()
-                    sp.paragraph_format.left_indent = Pt(18)
-                    sp.add_run("%d. %s" % (idx, step))
-
-            # Screenshot or placeholder
-            if func.screenshot:
-                figure_counter[0] = self._embed_screenshot(
-                    document, func, figure_counter[0]
-                )
-            else:
-                figure_counter[0] = self._add_screenshot_placeholder(
-                    document, func, figure_counter[0]
-                )
-
-            # Результат
-            self._labelled(document, "Результат:", func.result)
+        # --- Результат ---
+        self._labelled(document, "Результат:", func.result)
 
         # Separator
         sep = document.add_paragraph()
         sep.paragraph_format.space_after = Pt(6)
+
+    def _add_orphan_project_function(self, document, func):
+        """
+        Render a project function that had no auto predecessor to attach to.
+
+        Uses a compact italic paragraph — no function heading, no screenshot
+        placeholder — so it doesn't inflate the document structure.
+        """
+        desc = (func.description or '').strip()
+        if not desc:
+            return
+        p = document.add_paragraph()
+        r = p.add_run("%s: %s" % (func.name or "Дополнение", desc))
+        r.italic = True
+        r.font.color.rgb = _grey()
+        r.font.size = Pt(11)
+        sep = document.add_paragraph()
+        sep.paragraph_format.space_after = Pt(4)
 
     def _labelled(self, document, label, value):
         """Bold label + normal text in the same paragraph."""

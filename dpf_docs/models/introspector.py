@@ -85,6 +85,10 @@ class DocIntrospector(models.AbstractModel):
     def get_fields_meta(self, res_model):
         """Return ``fields_get`` metadata for a model, or empty dict.
 
+        Requests ``readonly`` and ``compute`` attributes in addition to the
+        base set so ``text_composer.compose_field_table_rows`` can filter out
+        computed / readonly fields and show only form-input fields.
+
         Run as a high-privilege user (e.g. admin) so group-restricted fields
         are not silently hidden from the documentation.
         """
@@ -92,7 +96,15 @@ class DocIntrospector(models.AbstractModel):
             return {}
         try:
             return self.env[res_model].fields_get(
-                attributes=["string", "help", "type", "required", "relation"]
+                attributes=[
+                    "string",
+                    "help",
+                    "type",
+                    "required",
+                    "relation",
+                    "readonly",   # <-- NEW: needed to skip pure read-only fields
+                    "compute",    # <-- NEW: non-empty string means it is computed
+                ]
             )
         except Exception as exc:  # pragma: no cover - defensive
             _logger.warning("fields_get failed for %s: %s", res_model, exc)

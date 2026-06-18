@@ -9,6 +9,42 @@ Pure-python and side-effect free. Two layers:
   text model. It is optional and never required for the module to work.
 """
 
+# Fields that are always present in every Odoo model but are never shown
+# on a "New record" form. We skip them to keep the field table focused on
+# the fields a user actually fills in.
+_SYSTEM_FIELDS = frozenset({
+    "id",
+    "display_name",
+    "create_uid",
+    "create_date",
+    "write_uid",
+    "write_date",
+    "__last_update",
+    "active",           # toggled via Archive/Unarchive, not a form input
+    "message_ids",
+    "message_follower_ids",
+    "message_partner_ids",
+    "message_is_follower",
+    "message_unread_counter",
+    "message_attachment_count",
+    "message_has_error",
+    "message_has_error_counter",
+    "message_needaction",
+    "message_needaction_counter",
+    "activity_ids",
+    "activity_state",
+    "activity_user_id",
+    "activity_type_id",
+    "activity_type_icon",
+    "activity_date_deadline",
+    "my_activity_date_deadline",
+    "activity_summary",
+    "activity_exception_decoration",
+    "activity_exception_icon",
+    "website_message_ids",
+    "has_message",
+})
+
 
 def compose_module_description(manifest, main_model_doc):
     """Build the top-level module description.
@@ -57,12 +93,16 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta):
     sentence = ("Screen '%s' shows the model %s in %s view."
                 % (menu_name, res_model, modes))
 
-    # Pick a handful of representative fields for a readable summary.
+    # Pick a handful of representative *input* fields for a readable summary.
     labels = []
     for fname, meta in (fields_meta or {}).items():
-        if fname.startswith("_") or fname in ("id", "display_name"):
+        if fname.startswith("_") or fname in _SYSTEM_FIELDS:
             continue
-        label = (meta or {}).get("string") or fname
+        meta = meta or {}
+        # Skip computed / readonly fields — they aren't user-facing inputs.
+        if meta.get("compute") or meta.get("readonly"):
+            continue
+        label = meta.get("string") or fname
         labels.append(label)
         if len(labels) >= 6:
             break
@@ -74,13 +114,35 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta):
 def compose_field_table_rows(fields_meta, field_comments=None):
     """Return a list of row dicts ready for templating.
 
+    **Only form-input fields are included.**  Specifically, the following are
+    excluded so the resulting table matches what a user actually sees on a
+    "New record" form:
+
+    * System / audit fields (id, create_uid, write_date, etc.)
+    * Computed fields (``compute`` attribute is a non-empty string)
+    * Purely read-only fields (``readonly=True`` in fields_get)
+    * Chatter / activity mixin fields (message_*, activity_*)
+    * Fields whose technical name starts with ``_``
+
     Each row merges runtime metadata (``fields_get``) with any inline comment
     recovered from the source code.
     """
     field_comments = field_comments or {}
     rows = []
     for fname, meta in sorted((fields_meta or {}).items()):
+        # --- skip non-input fields ---
+        if fname.startswith("_"):
+            continue
+        if fname in _SYSTEM_FIELDS:
+            continue
         meta = meta or {}
+        # A non-empty 'compute' string means this is a computed field.
+        if meta.get("compute"):
+            continue
+        # Purely read-only fields are not user-fillable inputs.
+        if meta.get("readonly"):
+            continue
+
         rows.append({
             "name": fname,
             "label": meta.get("string") or fname,
