@@ -19,6 +19,8 @@ How it works
       If matched -> function enriched IN-PLACE (sequence/position unchanged).
       If NOT matched -> a new function is created and inserted AFTER the
       thematically closest existing function (smart sequence placement).
+      Placement uses a bilingual keyword map so Russian task names are
+      correctly matched against English function names.
    c. Menu captions receive a best-effort fill from Jaccard similarity.
 """
 import logging
@@ -43,8 +45,100 @@ _SECTION_RE = re.compile(
 _FUNC_MATCH_THRESHOLD = 0.25
 
 # Lower threshold used only for smart sequence placement (not for enrichment).
-# We want to find the "closest neighbour" to insert after, even if overlap is weak.
 _PLACEMENT_THRESHOLD = 0.10
+
+# ---------------------------------------------------------------------------
+# Bilingual keyword map: Russian words found in task names -> sets of English
+# keywords that may appear in existing (auto-generated) function names.
+#
+# Keys are lowercased Russian words / short phrases.
+# Values are frozensets of lowercased English words.
+#
+# This map is used by _keyword_overlap() so that a Russian task like
+# "Регистрация участников" gets placed next to the "Registrations" function
+# even though Jaccard("регистрация участников", "registrations") == 0.0.
+# ---------------------------------------------------------------------------
+_KW_MAP: dict[str, frozenset] = {
+    # Events / мероприятия
+    'мероприятие':      frozenset({'event', 'events', 'management', 'router'}),
+    'мероприятия':      frozenset({'event', 'events', 'management'}),
+    'создание':         frozenset({'create', 'creation', 'new', 'event', 'events'}),
+    'управление':       frozenset({'management', 'manage', 'router', 'event'}),
+    'конференц':        frozenset({'event', 'events', 'room', 'rooms'}),
+    'конференции':      frozenset({'event', 'events', 'conference'}),
+    'выставки':         frozenset({'event', 'events', 'exhibition'}),
+    'лекции':           frozenset({'event', 'events', 'lecture'}),
+
+    # Rooms / помещения
+    'помещение':        frozenset({'room', 'rooms', 'venue', 'venues', 'space'}),
+    'помещения':        frozenset({'room', 'rooms', 'venue', 'venues'}),
+    'зал':              frozenset({'room', 'rooms', 'hall', 'venue'}),
+    'рассадка':         frozenset({'seating', 'room', 'rooms', 'venue', 'layout'}),
+    'схема':            frozenset({'layout', 'schema', 'room', 'venue'}),
+    'визуализация':     frozenset({'room', 'venue', 'layout', 'display'}),
+
+    # Venues / площадки
+    'площадка':         frozenset({'venue', 'venues', 'location'}),
+    'площадки':         frozenset({'venue', 'venues', 'location'}),
+    'место':            frozenset({'venue', 'venues', 'location', 'place'}),
+    'места':            frozenset({'venue', 'venues', 'seats', 'location'}),
+    'проведения':       frozenset({'venue', 'venues', 'location', 'event'}),
+
+    # Resources / ресурсы
+    'ресурс':           frozenset({'resource', 'resources', 'equipment'}),
+    'ресурсы':          frozenset({'resource', 'resources', 'equipment'}),
+    'бронирование':     frozenset({'booking', 'reservation', 'resource', 'equipment'}),
+    'пересечений':      frozenset({'conflict', 'overlap', 'resource', 'booking'}),
+    'пересечения':      frozenset({'conflict', 'overlap', 'resource'}),
+    'контроль':         frozenset({'control', 'check', 'resource', 'booking'}),
+
+    # Agenda / программа
+    'программа':        frozenset({'agenda', 'program', 'schedule'}),
+    'программы':        frozenset({'agenda', 'program', 'schedule'}),
+    'регламент':        frozenset({'agenda', 'schedule', 'regulation'}),
+    'выступлений':      frozenset({'agenda', 'speaker', 'speech'}),
+
+    # Equipment / оборудование
+    'оборудование':     frozenset({'equipment', 'gear', 'resource'}),
+    'оборудования':     frozenset({'equipment', 'gear', 'resource'}),
+    'внеплановые':      frozenset({'equipment', 'unplanned', 'ad-hoc'}),
+    'доступность':      frozenset({'availability', 'equipment', 'resource'}),
+
+    # Registrations / регистрации
+    'регистрация':      frozenset({'registration', 'registrations', 'signup'}),
+    'регистрации':      frozenset({'registration', 'registrations', 'signup'}),
+    'участников':       frozenset({'registration', 'registrations', 'participant', 'attendee'}),
+    'участники':        frozenset({'participant', 'attendee', 'registration'}),
+    'роли':             frozenset({'role', 'roles', 'registration', 'access'}),
+    'подтверждение':    frozenset({'confirmation', 'approve', 'registration'}),
+
+    # Notifications / уведомления
+    'уведомления':      frozenset({'notification', 'notifications', 'push', 'email'}),
+    'уведомление':      frozenset({'notification', 'notifications', 'push', 'email'}),
+    'push':             frozenset({'notification', 'push'}),
+    'email':            frozenset({'email', 'notification'}),
+
+    # Media / медиа
+    'медиа':            frozenset({'media', 'gallery', 'photo', 'video'}),
+    'медиагалерея':     frozenset({'media', 'gallery', 'library'}),
+    'фото':             frozenset({'photo', 'image', 'media', 'gallery'}),
+    'видео':            frozenset({'video', 'media', 'gallery'}),
+    'галерея':          frozenset({'gallery', 'media', 'library'}),
+
+    # Analytics / аналитика
+    'аналитика':        frozenset({'analytics', 'report', 'statistics', 'stats'}),
+    'отчёт':            frozenset({'report', 'analytics', 'export'}),
+    'отчет':            frozenset({'report', 'analytics', 'export'}),
+    'статистика':       frozenset({'statistics', 'analytics', 'report'}),
+    'история':          frozenset({'history', 'log', 'order', 'analytics'}),
+    'статус':           frozenset({'status', 'order', 'state'}),
+    'заказов':          frozenset({'order', 'orders', 'history'}),
+
+    # Export / экспорт
+    'экспорт':          frozenset({'export', 'report', 'pdf', 'xlsx'}),
+    'pdf':              frozenset({'pdf', 'report', 'export'}),
+    'xlsx':             frozenset({'xlsx', 'export', 'report'}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +172,46 @@ def _jaccard(a, b):
     return len(ta & tb) / len(ta | tb)
 
 
+def _keyword_overlap(task_title: str, func_name: str) -> float:
+    """
+    Cross-language similarity: translate Russian words in task_title to English
+    keyword sets via _KW_MAP, then measure overlap with func_name tokens.
+
+    Returns a score in [0.0, 1.0].  Score > 0 means at least one translated
+    keyword was found in func_name — good enough to be a placement neighbour.
+
+    Jaccard is tried first; if it returns a non-zero value we return that.
+    This function only adds value when Jaccard == 0 (i.e. RU vs EN).
+    """
+    jac = _jaccard(task_title, func_name)
+    if jac > 0:
+        return jac
+
+    task_words = _normalize(task_title).split()
+    func_tokens = set(_normalize(func_name).split())
+
+    if not task_words or not func_tokens:
+        return 0.0
+
+    translated: set[str] = set()
+    for word in task_words:
+        mapped = _KW_MAP.get(word)
+        if mapped:
+            translated |= mapped
+
+    if not translated:
+        return 0.0
+
+    hits = translated & func_tokens
+    if not hits:
+        return 0.0
+
+    # Score = proportion of translated keywords that matched, capped at 0.5
+    # (never reaches Jaccard level so in-place matches still dominate).
+    score = min(len(hits) / len(translated), 0.5)
+    return score
+
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -86,7 +220,7 @@ class DocProjectEnricher(models.AbstractModel):
     """
     Enriches doc.module / doc.menu / doc.function records with project task data.
 
-    Key behaviour (v4)
+    Key behaviour (v5)
     ------------------
     * Each subtask from the project is matched against EXISTING doc.function
       records on the module by:
@@ -98,13 +232,12 @@ class DocProjectEnricher(models.AbstractModel):
       are NOT changed.
 
     * No match     -> a new doc.function is created.  Its sequence is
-      computed by finding the thematically closest existing function
-      (highest Jaccard score >= 0.10) and inserting AFTER it
-      (neighbour.sequence + 5).  If no neighbour qualifies, the new
-      function goes after the last existing one (max_seq + 10).
-
-      This means unmatched tasks are placed thematically, not dumped at
-      the bottom of the document.
+      computed by _compute_insert_sequence which uses a BILINGUAL keyword
+      map (_KW_MAP) to find the thematically closest existing function even
+      when the task is in Russian and the function name is in English.
+      The new function is inserted AFTER the best neighbour (neighbour.sequence + 5).
+      If no neighbour qualifies, the new function goes after the last existing
+      one (max_seq + 10).
     """
 
     _name = 'doc.project.enricher'
@@ -258,7 +391,7 @@ class DocProjectEnricher(models.AbstractModel):
         return result
 
     # ------------------------------------------------------------------ #
-    # doc.function upsert — IN-PLACE MATCHING + SMART PLACEMENT (v4)     #
+    # doc.function upsert — IN-PLACE MATCHING + SMART PLACEMENT (v5)     #
     # ------------------------------------------------------------------ #
 
     def _upsert_functions_from_snaps(self, doc_module, functional_snaps, overwrite=False):
@@ -268,8 +401,8 @@ class DocProjectEnricher(models.AbstractModel):
         function IN-PLACE (preserving sequence/position).
 
         If NOT matched, create a new function inserted AFTER the thematically
-        closest existing function (Jaccard >= 0.10), so the new entry appears
-        near related content rather than at the very end.
+        closest existing function using bilingual keyword matching, so the new
+        entry appears near related content rather than at the very end.
 
         Returns the count of functions enriched or created.
         """
@@ -289,8 +422,6 @@ class DocProjectEnricher(models.AbstractModel):
         max_seq = max((f.sequence or 0 for f in existing_funcs), default=0)
 
         count = 0
-        # Track which existing functions have already been matched so one
-        # function is not enriched twice from different tasks.
         matched_func_ids = set()
 
         for snap in functional_snaps:
@@ -357,7 +488,6 @@ class DocProjectEnricher(models.AbstractModel):
                     title, existing_funcs, max_seq
                 )
                 # Shift all functions that currently have sequence >= insert_seq
-                # to make room (gap of 10) so the new function fits cleanly.
                 for ef in existing_funcs:
                     if (ef.sequence or 0) >= insert_seq:
                         ef.write({'sequence': (ef.sequence or 0) + 10})
@@ -367,8 +497,6 @@ class DocProjectEnricher(models.AbstractModel):
                     'name': title,
                     'sequence': insert_seq,
                     'description': desc or False,
-                    # Mark as project-sourced so the export knows to render
-                    # only the description block (no placeholder screenshot).
                     'source': 'project',
                 }
                 for field_name, value in [
@@ -381,7 +509,6 @@ class DocProjectEnricher(models.AbstractModel):
                         vals[field_name] = value
                 new_func = self.env['doc.function'].create(vals)
                 existing_funcs.append(new_func)
-                # Update max_seq in case there are multiple unmatched tasks
                 max_seq = max(max_seq, insert_seq)
                 count += 1
                 _logger.info(
@@ -395,23 +522,30 @@ class DocProjectEnricher(models.AbstractModel):
         )
         return count
 
-    def _compute_insert_sequence(self, task_title, existing_funcs, max_seq):
+    def _compute_insert_sequence(self, task_title: str, existing_funcs: list, max_seq: int) -> int:
         """
         Find the best thematic neighbour among existing functions and return
         a sequence value that places the new function AFTER it.
 
-        If no neighbour scores >= _PLACEMENT_THRESHOLD, fall back to
-        max_seq + 10 (append at end, before Literature/Glossary).
+        Strategy (in order):
+        1. _keyword_overlap() — bilingual RU->EN keyword map + Jaccard.
+           Works even when task is Russian and function names are English.
+        2. Falls back to max_seq + 10 if no neighbour scores > 0.
+
+        The threshold is intentionally very low (> 0) so that any single
+        keyword hit is enough to establish a neighbourhood.  This prevents
+        functions from falling to the bottom of the document.
         """
         best_func = None
         best_score = 0.0
+
         for func in existing_funcs:
-            score = _jaccard(task_title, func.name or '')
+            score = _keyword_overlap(task_title, func.name or '')
             if score > best_score:
                 best_score = score
                 best_func = func
 
-        if best_func and best_score >= _PLACEMENT_THRESHOLD:
+        if best_func and best_score > 0:
             neighbour_seq = best_func.sequence or 0
             insert_seq = neighbour_seq + 5
             _logger.debug(
@@ -433,8 +567,6 @@ class DocProjectEnricher(models.AbstractModel):
 
         Uses Jaccard word-overlap on normalised names.  The candidate with the
         highest score above `threshold` that has not been matched yet is returned.
-
-        Returns the matching doc.function record or None.
         """
         best_func = None
         best_score = 0.0
@@ -545,9 +677,8 @@ class DocProjectEnricher(models.AbstractModel):
             '\u043f\u043e\u0440\u044f\u0434\u043e\u043a': 'steps',
             '\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442': 'result',
         }
-        # Section headers that mark content we must DISCARD (not include in docs)
         _DISCARD_HEADERS = {
-            '\u0447\u0442\u043e \u0441\u0434\u0435\u043b\u0430\u0442\u044c',  # ЧТО СДЕЛАТЬ
+            '\u0447\u0442\u043e \u0441\u0434\u0435\u043b\u0430\u0442\u044c',
             '\u0447\u0442\u043e \u043d\u0443\u0436\u043d\u043e \u0441\u0434\u0435\u043b\u0430\u0442\u044c',
         }
 
@@ -572,8 +703,6 @@ class DocProjectEnricher(models.AbstractModel):
                     current_key = mapped
                     discard_mode = False
                     continue
-                # Unknown header — could be a subsection within description;
-                # keep it unless we're in discard mode.
                 if discard_mode:
                     continue
 
