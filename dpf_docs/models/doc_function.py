@@ -14,6 +14,11 @@ or workflow step) the way the reference user manual does it:
 Functions are normally generated automatically from the module's menu tree
 (one function per documented screen), but they are editable so a human can
 refine the wording before exporting.
+
+The ``source`` field controls how the Word export renders the function block:
+  'auto'    — full render (Требования / Порядок / screenshot / Результат)
+  'project' — description-only render (no screenshot placeholder, no empty
+               sections)
 """
 from odoo import api, fields, models
 
@@ -60,6 +65,20 @@ class DocFunction(models.Model):
     result = fields.Text(
         string="Result",
         help="Rendered after the bold 'Результат:' label.",
+    )
+
+    # How this function was created.  Controls Word export rendering:
+    #   'auto'    -> full block (Требования / Порядок / screenshot / Результат)
+    #   'project' -> description-only (no placeholder screenshot, no empty labels)
+    source = fields.Selection(
+        [
+            ('auto', 'Auto (from menu)'),
+            ('project', 'From Project Tasks'),
+        ],
+        string="Source",
+        default='auto',
+        help="Controls Word export rendering.  'project' functions are rendered "
+             "with only the Описание block; no screenshot placeholder is added.",
     )
 
     # Illustration shown in the manual. Two ways to fill it:
