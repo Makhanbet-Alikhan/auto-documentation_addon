@@ -458,7 +458,7 @@ class DocGeneration(models.Model):
     def action_download_word(self):
         self.ensure_one()
         if not self.doc_module_ids:
-            raise UserError_("Нечего экспортировать."))
+            raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
         for doc_module in self.doc_module_ids:
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)

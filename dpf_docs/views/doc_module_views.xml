@@ -106,6 +106,7 @@
                                     <field name="res_model"/>
                                     <field name="view_modes"/>
                                     <field name="capture_state"/>
+                                    <field name="groups_info"/>
                                 </list>
                                 <form>
                                     <sheet>
@@ -116,8 +117,7 @@
                                             <field name="view_modes"/>
                                             <field name="web_url"/>
                                             <field name="capture_state"/>
-                                            <field name="capture_error"
-                                                   invisible="capture_state != 'error'"/>
+                                            <field name="groups_info"/>
                                         </group>
                                         <field name="caption" widget="text"/>
                                         <field name="screenshot" widget="image"/>
@@ -131,6 +131,7 @@
                                     <field name="technical_name"/>
                                     <field name="display_name"/>
                                     <field name="field_count"/>
+                                    <field name="is_primary"/>
                                 </list>
                                 <form>
                                     <sheet>
@@ -138,8 +139,10 @@
                                             <field name="technical_name"/>
                                             <field name="display_name"/>
                                             <field name="field_count"/>
+                                            <field name="is_primary"/>
                                         </group>
                                         <field name="description" widget="text"/>
+                                        <field name="business_logic_text" widget="text"/>
                                     </sheet>
                                 </form>
                             </field>
