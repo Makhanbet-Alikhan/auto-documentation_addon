@@ -3,17 +3,20 @@
 
 Generates a complete Russian-language user manual in Word format:
 
-* Tittle page (system name, "Руководство пользователя", version, developer, city/year)
+* Title page (system name, "Руководство пользователя", version, developer, city/year)
 * Real Word TOC field ("ОГЛАВЛЕНИЕ")
 * 1. Введение (1.1 Категории, 1.2 Область, 1.3 Назначение, 1.4 Соглашения)
 * 2. Содержание документа (2.1 Назначение, 2.2 Материалы, 2.3 Подготовка)
 * 3. Список функций — one block per function:
-    Функция N: <title>  →  Описание / Требования / Порядок выполнения / screenshot or placeholder / Результат
+    Функция N: <title>
+    source='auto'    -> Описание / Требования / Порядок / screenshot or placeholder / Результат
+    source='project' -> Описание only (no placeholder, no empty sections)
 * 4. Литература
 * 5. Словарь терминов
 
-Screenshots are optional: if a function has no screenshot a greyed
-italic placeholder line is inserted instead.
+Function and figure numbers are assigned by a single sequential counter
+that spans all functions regardless of source, guaranteeing correct
+сквозной (квозной) numeration across the whole document.
 
 ``python-docx`` is loaded lazily so the addon still installs without it;
 the Word button then raises a clear, actionable error.
@@ -39,7 +42,6 @@ except ImportError:  # pragma: no cover
 
 BODY_FONT = "Times New Roman"
 BODY_SIZE = 12
-_GREY = None  # lazy RGBColor below
 
 
 def _grey():
@@ -66,6 +68,9 @@ class DocWordExport(models.AbstractModel):
                 "Попросите администратора выполнить:  pip install python-docx"
             ))
 
+        # Re-number all functions before export so DB values match the document.
+        self._renumber_functions(doc_modules)
+
         document = docx.Document()
         self._apply_base_styles(document)
 
@@ -81,6 +86,27 @@ class DocWordExport(models.AbstractModel):
         buf = io.BytesIO()
         document.save(buf)
         return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # Function renumbering
+    # ------------------------------------------------------------------
+    @api.model
+    def _renumber_functions(self, doc_modules):
+        """
+        Assign sequential 1-based numbers to all functions across all modules.
+
+        Functions are sorted per module by (sequence, id) and numbered
+        globally so every Функция N has a unique N.
+        """
+        counter = 0
+        for doc_module in doc_modules:
+            funcs = doc_module.function_ids.sorted(
+                key=lambda f: ((f.sequence or 999999), f.id)
+            )
+            for func in funcs:
+                counter += 1
+                if func.number != counter:
+                    func.write({'number': counter})
 
     # ------------------------------------------------------------------
     # Styling
@@ -241,11 +267,12 @@ class DocWordExport(models.AbstractModel):
     # 3. Список функций
     # ------------------------------------------------------------------
     def _add_functions_section(self, document, doc_modules):
-        # NOTE: page_break removed here — the Heading 1 style already forces
-        # a new page in Word, and an explicit break was creating a blank page.
         self._heading(document, "3. Список функций", 1)
 
-        figure = 0
+        # Global counters span all modules so numeration is always sequential.
+        figure_counter = [0]  # mutable container so helpers can update it
+        func_counter = [0]
+
         sub = 0
         for doc_module in doc_modules:
             sub += 1
@@ -253,7 +280,7 @@ class DocWordExport(models.AbstractModel):
             self._heading(document, "3.%d. %s" % (sub, mod_name), 2)
 
             funcs = doc_module.function_ids.sorted(
-                key=lambda f: ((f.number or 999999), (f.sequence or 999999), f.id)
+                key=lambda f: ((f.sequence or 999999), f.id)
             )
             if not funcs:
                 p = document.add_paragraph()
@@ -263,52 +290,80 @@ class DocWordExport(models.AbstractModel):
                 continue
 
             for func in funcs:
-                figure = self._add_function(document, func, figure)
+                func_counter[0] += 1
+                self._add_function(
+                    document, func,
+                    func_num=func_counter[0],
+                    figure_counter=figure_counter,
+                )
 
-    def _add_function(self, document, func, figure):
-        """Render one function block. Returns updated figure counter."""
-        # Функция N: Title
+    def _add_function(self, document, func, func_num, figure_counter):
+        """
+        Render one function block.
+
+        Parameters
+        ----------
+        func_num      : sequential 1-based function number for this document
+        figure_counter: list([int]) — mutable counter shared across all functions;
+                        updated in-place when a figure is emitted
+        """
+        is_project = (getattr(func, 'source', 'auto') or 'auto') == 'project'
+
+        # --- Функция N: Title ---
         title_p = document.add_paragraph()
         title_p.paragraph_format.space_before = Pt(10)
-        r = title_p.add_run("Функция %d: %s." % (func.number or 0, func.name or ""))
+        r = title_p.add_run("Функция %d: %s." % (func_num, func.name or ""))
         r.bold = True
         r.font.size = Pt(12)
 
-        # Описание
-        self._labelled(document, "Описание:", func.description)
-
-        # Требования (red text)
-        if func.requirements and func.requirements.strip():
-            p = document.add_paragraph()
-            lbl = p.add_run("Требования: ")
-            lbl.bold = True
-            val = p.add_run(func.requirements.strip())
-            val.font.color.rgb = _red()
-
-        # Порядок выполнения
-        steps = func.step_lines() if hasattr(func, "step_lines") else []
-        if steps:
-            p = document.add_paragraph()
-            p.add_run("Порядок выполнения:").bold = True
-            for idx, step in enumerate(steps, 1):
-                sp = document.add_paragraph()
-                sp.paragraph_format.left_indent = Pt(18)
-                sp.add_run("%d. %s" % (idx, step))
-
-        # Screenshot or placeholder
-        if func.screenshot:
-            figure = self._embed_screenshot(document, func, figure)
+        if is_project:
+            # ---- Project-sourced function: description only ----
+            # Do NOT emit Требования / Порядок / screenshot placeholder / Результат.
+            # Only emit Описание if there is actual content.
+            self._labelled(document, "Описание:", func.description)
+            # If a real screenshot was manually attached, still show it.
+            if func.screenshot:
+                figure_counter[0] = self._embed_screenshot(
+                    document, func, figure_counter[0]
+                )
         else:
-            figure = self._add_screenshot_placeholder(document, func, figure)
+            # ---- Auto-generated function: full render ----
+            self._labelled(document, "Описание:", func.description)
 
-        # Результат
-        self._labelled(document, "Результат:", func.result)
+            # Требования (red text)
+            if func.requirements and func.requirements.strip():
+                p = document.add_paragraph()
+                lbl = p.add_run("Требования: ")
+                lbl.bold = True
+                val = p.add_run(func.requirements.strip())
+                val.font.color.rgb = _red()
+
+            # Порядок выполнения
+            steps = func.step_lines() if hasattr(func, "step_lines") else []
+            if steps:
+                p = document.add_paragraph()
+                p.add_run("Порядок выполнения:").bold = True
+                for idx, step in enumerate(steps, 1):
+                    sp = document.add_paragraph()
+                    sp.paragraph_format.left_indent = Pt(18)
+                    sp.add_run("%d. %s" % (idx, step))
+
+            # Screenshot or placeholder
+            if func.screenshot:
+                figure_counter[0] = self._embed_screenshot(
+                    document, func, figure_counter[0]
+                )
+            else:
+                figure_counter[0] = self._add_screenshot_placeholder(
+                    document, func, figure_counter[0]
+                )
+
+            # Результат
+            self._labelled(document, "Результат:", func.result)
 
         # Separator
         sep = document.add_paragraph()
         sep.paragraph_format.space_after = Pt(6)
-
-        return figure
 
     def _labelled(self, document, label, value):
         """Bold label + normal text in the same paragraph."""
@@ -320,7 +375,7 @@ class DocWordExport(models.AbstractModel):
         p.add_run(value.strip())
 
     def _embed_screenshot(self, document, func, figure):
-        """Embed a real screenshot image with a figure caption."""
+        """Embed a real screenshot image with a figure caption. Returns updated figure count."""
         try:
             stream = io.BytesIO(base64.b64decode(func.screenshot))
             document.add_picture(stream, width=Inches(5.5))
@@ -339,12 +394,11 @@ class DocWordExport(models.AbstractModel):
         return figure
 
     def _add_screenshot_placeholder(self, document, func, figure):
-        """Вставить текстовую заглушку вместо скриншота."""
+        """Вставить текстовую заглушку вместо скриншота. Returns updated figure count."""
         figure += 1
         name = func.name or "экрана"
         caption_text = func.screenshot_caption or name
 
-        # Grey bordered placeholder block
         p = document.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(
@@ -355,7 +409,6 @@ class DocWordExport(models.AbstractModel):
         r.italic = True
         r.font.size = Pt(11)
 
-        # Caption line below placeholder
         cap_p = document.add_paragraph()
         cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         cap_r = cap_p.add_run("Рис.%d %s" % (figure, caption_text))
