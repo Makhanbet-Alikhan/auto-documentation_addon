@@ -15,6 +15,19 @@ The distinction is critical for user-oriented documentation:
 
 Access-group information is also collected from ir.ui.menu records so the
 document can state which user roles can see each screen.
+
+v2 improvements
+---------------
+* get_module_models — now also returns models extended via _inherit by
+  scanning ir.model.fields records owned by the module.  This covers
+  modules that add fields to existing models without declaring a new model.
+* get_business_logic — now also collects @api.constrains methods so
+  validation rules (conflict checks, date validations, etc.) are visible
+  in the generated documentation.
+* get_embedded_models — new method that discovers One2many child models
+  of any given model ("tabular parts" embedded in forms).
+* _SYSTEM_FIELDS — extended with website.published.mixin fields so they
+  are not shown in user-facing field tables.
 """
 import logging
 import re
@@ -50,6 +63,13 @@ _SYSTEM_FIELDS: frozenset = frozenset({
     "rating_ids", "rating_last_value", "rating_avg",
     # Sequence (internal ordering)
     "sequence",
+    # website.published.mixin — never relevant for user-facing docs
+    "website_published", "is_published", "website_url",
+    "cover_properties", "header_visible", "footer_visible",
+    "can_publish", "website_id", "website_description",
+    # Standard technical fields added by various mixins
+    "active", "color", "priority",
+    "access_token", "access_warning",
 })
 
 
@@ -98,7 +118,7 @@ class DocIntrospector(models.AbstractModel):
         """Return the module's menus as a flat list of node dicts.
 
         Each node carries ``groups`` — a list of group names so the
-        documentation can state which roles can access the screen.
+        documentation can state which user roles can access the screen.
         """
         menus = self._records_of_module(module_name, "ir.ui.menu")
         nodes = []
@@ -189,15 +209,21 @@ class DocIntrospector(models.AbstractModel):
         Returns a dict:
           - ``workflow_states``: list of (value, label) from 'state' selection
           - ``action_buttons``: list of action button labels
+          - ``constraints``:    list of {method, label, fields} dicts from
+                                @api.constrains — shown as validation rules
         """
         result = {
             "workflow_states": [],
             "action_buttons": [],
+            "constraints": [],
         }
         if not res_model or res_model not in self.env:
             return result
 
         all_meta = self.get_fields_meta(res_model)
+
+        # --- Workflow states ---
+        # Look for a 'state' selection field, then kanban_state, then stage_id.
         for fname in ("state", "kanban_state", "stage_id"):
             meta = all_meta.get(fname)
             if not meta:
@@ -219,6 +245,8 @@ class DocIntrospector(models.AbstractModel):
                     pass
                 break
 
+        # --- Action buttons ---
+        # Discover all action_* methods on the model class.
         try:
             model_cls = type(self.env[res_model])
             for attr_name in sorted(dir(model_cls)):
@@ -232,30 +260,141 @@ class DocIntrospector(models.AbstractModel):
         except Exception as exc:
             _logger.debug("action_* discovery failed for %s: %s", res_model, exc)
 
+        # --- Constraints (@api.constrains) ---
+        # These become "automatic validation rules" in the documentation.
+        try:
+            model_cls = type(self.env[res_model])
+            for attr_name in sorted(dir(model_cls)):
+                method = getattr(model_cls, attr_name, None)
+                if not callable(method):
+                    continue
+                # @api.constrains sets the _constrains attribute on the function
+                constrained_fields = getattr(method, "_constrains", None)
+                if not constrained_fields:
+                    continue
+                label = re.sub(r"[_]+", " ", attr_name).strip().title()
+                result["constraints"].append({
+                    "method": attr_name,
+                    "label": label,
+                    "fields": list(constrained_fields),
+                })
+        except Exception as exc:
+            _logger.debug("constraints discovery failed for %s: %s", res_model, exc)
+
         return result
 
     # ------------------------------------------------------------------
-    # Module models
+    # Module models (own + inherited via _inherit)
     # ------------------------------------------------------------------
     @api.model
     def get_module_models(self, module_name):
-        """Return list of model info dicts declared by the module."""
-        imd = self.env["ir.model.data"].search([
+        """Return list of model info dicts declared OR extended by the module.
+
+        Two passes are performed:
+
+        1. Own models — ir.model records whose external ID belongs to
+           ``module_name``.  These are models with ``_name = ...`` in the
+           module source.
+
+        2. Inherited models — models to which ``module_name`` added at least
+           one field (``_inherit`` pattern).  Detected by scanning
+           ir.model.fields records whose external ID belongs to the module.
+
+        Each entry in the returned list carries an ``inherited`` boolean so
+        callers can render own and inherited models differently.
+        """
+        # Pass 1: own models
+        imd_models = self.env["ir.model.data"].search([
             ("module", "=", module_name),
             ("model", "=", "ir.model"),
         ])
-        model_ids = imd.mapped("res_id")
-        if not model_ids:
-            return []
-        ir_models = self.env["ir.model"].browse(model_ids).exists()
+        model_ids = imd_models.mapped("res_id")
+        ir_models_own = self.env["ir.model"].browse(model_ids).exists()
+
         result = []
-        for m in ir_models:
+        seen_models = set()
+
+        for m in ir_models_own:
             result.append({
                 "model": m.model,
                 "name": m.name,
                 "transient": m.transient,
+                "inherited": False,
             })
+            seen_models.add(m.model)
+
+        # Pass 2: models extended via _inherit (the module added fields to them)
+        imd_fields = self.env["ir.model.data"].search([
+            ("module", "=", module_name),
+            ("model", "=", "ir.model.fields"),
+        ])
+        if imd_fields:
+            field_ids = imd_fields.mapped("res_id")
+            ir_fields = self.env["ir.model.fields"].browse(field_ids).exists()
+            for fld in ir_fields:
+                m = fld.model_id
+                if not m or m.model in seen_models:
+                    continue
+                result.append({
+                    "model": m.model,
+                    "name": m.name,
+                    "transient": m.transient,
+                    "inherited": True,
+                })
+                seen_models.add(m.model)
+
         return result
+
+    # ------------------------------------------------------------------
+    # Embedded (One2many child) models
+    # ------------------------------------------------------------------
+    @api.model
+    def get_embedded_models(self, res_model):
+        """Return One2many child models of ``res_model``.
+
+        These are "tabular parts" embedded in the form view (e.g. schedule
+        lines, order lines, registration rows) that have no top-level menu
+        of their own but are still important for documentation.
+
+        Returns a list of dicts::
+
+            [
+                {
+                    "field": "schedule_line_ids",
+                    "model": "some.schedule.line",
+                    "name": "Schedule Lines",
+                }
+            ]
+        """
+        if not res_model or res_model not in self.env:
+            return []
+        try:
+            meta = self.env[res_model].fields_get(
+                attributes=["type", "relation", "string"]
+            )
+        except Exception as exc:
+            _logger.warning("get_embedded_models fields_get failed for %s: %s", res_model, exc)
+            return []
+
+        embedded = []
+        seen_relations = set()
+        for fname, fmeta in meta.items():
+            if fmeta.get("type") != "one2many":
+                continue
+            rel = fmeta.get("relation")
+            if not rel or rel in seen_relations:
+                continue
+            if rel not in self.env:
+                continue
+            seen_relations.add(rel)
+            model_obj = self.env[rel]
+            embedded.append({
+                "field": fname,
+                "field_label": fmeta.get("string") or fname,
+                "model": rel,
+                "name": model_obj._description or rel,
+            })
+        return embedded
 
     # ------------------------------------------------------------------
     # Primary model detection
@@ -267,12 +406,21 @@ class DocIntrospector(models.AbstractModel):
         Strategy: the model with the most Many2one fields pointing TO it
         from within the same module is the primary model.
         Falls back to the first non-transient model alphabetically.
+
+        Note: only *own* (non-inherited) models are candidates for primary.
         """
         models_info = self.get_module_models(module_name)
         if not models_info:
             return None
 
-        non_transient = [m for m in models_info if not m.get("transient")]
+        # Only own (non-inherited) models are candidates for primary
+        non_transient = [
+            m for m in models_info
+            if not m.get("transient") and not m.get("inherited")
+        ]
+        if not non_transient:
+            # Fall back to all non-transient (includes inherited)
+            non_transient = [m for m in models_info if not m.get("transient")]
         if not non_transient:
             return models_info[0]["model"]
         if len(non_transient) == 1:
