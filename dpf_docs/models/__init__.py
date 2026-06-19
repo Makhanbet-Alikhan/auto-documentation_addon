@@ -8,8 +8,10 @@ from . import doc_screenshot_capturer
 from . import doc_model_info
 from . import doc_menu
 from . import doc_function
+from . import doc_module_extensions  # workflow, inherited, integration, analytics models
 from . import doc_module
 from . import doc_project_snapshot_set
 from . import doc_project_task_snapshot
 from . import doc_project_enricher
 from . import doc_generation
+from . import screenshot_runner

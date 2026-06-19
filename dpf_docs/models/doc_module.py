@@ -41,12 +41,49 @@ class DocModule(models.Model):
     content_purpose = fields.Text(string="2.1 Purpose")
     content_materials = fields.Text(string="2.2 Materials")
     content_preparation = fields.Text(string="2.3 Preparation")
-    bibliography = fields.Text(string="4 Bibliography")
-    glossary = fields.Text(string="5 Glossary")
+    bibliography = fields.Text(string="8 Bibliography")
+    glossary = fields.Text(string="9 Glossary")
 
     menu_ids = fields.One2many("doc.menu", "doc_module_id", string="Menus")
     model_ids = fields.One2many("doc.model.info", "doc_module_id", string="Models")
     function_ids = fields.One2many("doc.function", "doc_module_id", string="Functions")
+
+    # ------------------------------------------------------------------
+    # Extended documentation sections (populated manually or via future
+    # automated introspectors).  All are optional — the Word exporter
+    # skips a section entirely when the corresponding relation is empty.
+    # ------------------------------------------------------------------
+    workflow_state_ids = fields.One2many(
+        "doc.workflow.state", "doc_module_id",
+        string="3. Lifecycle States",
+        help="States and transitions of the main object (workflow/state machine). "
+             "When filled, Section 3 appears in the generated Word document.",
+    )
+    inherited_model_ids = fields.One2many(
+        "doc.inherited.model", "doc_module_id",
+        string="4. Inherited Model Extensions",
+        help="Base Odoo models extended via _inherit. Fields added to those models "
+             "are missed by the standard introspector. "
+             "When filled, Section 4 appears in the generated Word document.",
+    )
+    integration_ids = fields.One2many(
+        "doc.integration", "doc_module_id",
+        string="5. External Integrations",
+        help="External services used by the module (MinIO, RabbitMQ, SMTP, etc.). "
+             "When filled, Section 5 appears in the generated Word document.",
+    )
+    analytic_field_ids = fields.One2many(
+        "doc.analytic.field", "doc_module_id",
+        string="7. Analytic Fields",
+        help="Computed KPI fields not visible in the standard field list. "
+             "When filled, Section 7 appears in the generated Word document.",
+    )
+    export_action_ids = fields.One2many(
+        "doc.export.action", "doc_module_id",
+        string="7. Export Actions",
+        help="PDF/XLSX/CSV export buttons on forms or list views. "
+             "When filled, Section 7 appears in the generated Word document.",
+    )
 
     menu_count = fields.Integer(string="Menus", compute="_compute_counts", store=True)
     model_count = fields.Integer(string="Models", compute="_compute_counts", store=True)
