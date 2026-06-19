@@ -13,3 +13,15 @@ access_doc_snapshot_set_user,doc.project.snapshot.set.user,model_doc_project_sna
 access_doc_snapshot_set_manager,doc.project.snapshot.set.manager,model_doc_project_snapshot_set,group_doc_manager,1,1,1,1
 access_doc_task_snapshot_user,doc.project.task.snapshot.user,model_doc_project_task_snapshot,group_doc_user,1,1,1,1
 access_doc_task_snapshot_manager,doc.project.task.snapshot.manager,model_doc_project_task_snapshot,group_doc_manager,1,1,1,1
+access_doc_workflow_state_user,doc.workflow.state.user,model_doc_workflow_state,group_doc_user,1,1,1,1
+access_doc_workflow_state_manager,doc.workflow.state.manager,model_doc_workflow_state,group_doc_manager,1,1,1,1
+access_doc_inherited_model_user,doc.inherited.model.user,model_doc_inherited_model,group_doc_user,1,1,1,1
+access_doc_inherited_model_manager,doc.inherited.model.manager,model_doc_inherited_model,group_doc_manager,1,1,1,1
+access_doc_inherited_field_user,doc.inherited.field.user,model_doc_inherited_field,group_doc_user,1,1,1,1
+access_doc_inherited_field_manager,doc.inherited.field.manager,model_doc_inherited_field,group_doc_manager,1,1,1,1
+access_doc_integration_user,doc.integration.user,model_doc_integration,group_doc_user,1,1,1,1
+access_doc_integration_manager,doc.integration.manager,model_doc_integration,group_doc_manager,1,1,1,1
+access_doc_analytic_field_user,doc.analytic.field.user,model_doc_analytic_field,group_doc_user,1,1,1,1
+access_doc_analytic_field_manager,doc.analytic.field.manager,model_doc_analytic_field,group_doc_manager,1,1,1,1
+access_doc_export_action_user,doc.export.action.user,model_doc_export_action,group_doc_user,1,1,1,1
+access_doc_export_action_manager,doc.export.action.manager,model_doc_export_action,group_doc_manager,1,1,1,1
