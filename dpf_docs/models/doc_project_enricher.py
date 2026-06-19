@@ -42,6 +42,22 @@ there were several functions sharing the same topic (e.g. multiple
 
 This guarantees the new entry always lands AFTER the whole thematic group,
 never in the middle of it.
+
+v2 fix — noise-line filtering in _parse_subtask_sections
+---------------------------------------------------------
+Task descriptions often contain implementation notes that should NEVER
+appear in user-facing documentation:
+  * «ТС §П.2 | Оценка: 3.0 нед.»  — technical spec references
+  * «Оценка: 3.0 нед.»         — effort estimates
+  * «GET https://...» / «POST ...»    — raw API endpoint notes
+  * «§1. Пункт ТЗ»              — spec paragraph references
+  * «----------»                    — horizontal separators
+  * «ЧТО СДЕЛАТЬ» / «ЧТО НУЖНО СДЕЛАТЬ»  — dev task headers (already
+    handled by _DISCARD_HEADERS, but now also caught by patterns)
+
+The new _NOISE_LINE_PATTERNS list is applied per-line BEFORE the line is
+added to any bucket.  Patterns are generic regexes — NOT tied to any
+specific module — so the fix works for every documented addon.
 """
 import logging
 import re
@@ -65,6 +81,43 @@ _SECTION_RE = re.compile(
     flags=re.UNICODE | re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Noise-line patterns — lines matching ANY of these are silently discarded
+# from every documentation bucket regardless of the current section.
+#
+# Rules are intentionally generic so they work for any Odoo addon, not just
+# dpf_events.  Add new patterns here when new categories of noise appear.
+# ---------------------------------------------------------------------------
+_NOISE_LINE_PATTERNS = [
+    # Technical-spec references: "ТС §П.2", "ТС §И.1", etc.
+    re.compile(r'\u0422\u0421\s*\xa7', re.UNICODE),
+    # Effort estimates: "Оценка:\s*3.0", "Оценка:\s*0.5 нед."
+    re.compile(r'\u041e\u0446\u0435\u043d\u043a\u0430\s*:', re.UNICODE),
+    # Spec paragraph anchors: "§1.", "§ 2.3"
+    re.compile(r'^\s*\xa7\s*\d', re.UNICODE),
+    # Raw HTTP method lines: "GET https://...", "POST http://..."
+    re.compile(r'^\s*(GET|POST|PUT|PATCH|DELETE)\s+https?://', re.IGNORECASE),
+    # Bare URLs on their own line
+    re.compile(r'^\s*https?://\S+\s*$', re.IGNORECASE),
+    # Horizontal separators: "---", "====", "___"
+    re.compile(r'^\s*[-=_]{3,}\s*$'),
+    # Developer task keywords that slipped through the header filter
+    re.compile(r'\u0447\u0442\u043e\s+(\u043d\u0443\u0436\u043d\u043e\s+)?'
+               r'\u0441\u0434\u0435\u043b\u0430\u0442\u044c', re.UNICODE | re.IGNORECASE),
+    # Inline spec markers: "| Оценка", "| Task #27"
+    re.compile(r'\|\s*(\u041e\u0446\u0435\u043d\u043a\u0430|Task\s*#)', re.UNICODE | re.IGNORECASE),
+]
+
+
+def _is_noise_line(line: str) -> bool:
+    """Return True if the line is a technical/implementation artifact
+    that must not appear in user-facing documentation."""
+    for pattern in _NOISE_LINE_PATTERNS:
+        if pattern.search(line):
+            return True
+    return False
+
+
 # Threshold for in-place matching (Jaccard).
 _FUNC_MATCH_THRESHOLD = 0.25
 
@@ -77,72 +130,72 @@ _PLACEMENT_THRESHOLD = 0.0
 # ---------------------------------------------------------------------------
 _KW_MAP: dict[str, frozenset] = {
     # Events
-    'мероприятие':   frozenset({'event', 'events', 'management', 'router'}),
-    'мероприятия':   frozenset({'event', 'events', 'management'}),
-    'создание':      frozenset({'create', 'creation', 'new', 'event', 'events'}),
-    'управление':    frozenset({'management', 'manage', 'router', 'event'}),
-    'конференц':     frozenset({'event', 'events', 'room', 'rooms'}),
-    'конференции':   frozenset({'event', 'events', 'conference'}),
-    'выставки':      frozenset({'event', 'events', 'exhibition'}),
-    'лекции':        frozenset({'event', 'events', 'lecture'}),
+    '\u043c\u0435\u0440\u043e\u043f\u0440\u0438\u044f\u0442\u0438\u0435':   frozenset({'event', 'events', 'management', 'router'}),
+    '\u043c\u0435\u0440\u043e\u043f\u0440\u0438\u044f\u0442\u0438\u044f':   frozenset({'event', 'events', 'management'}),
+    '\u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435':      frozenset({'create', 'creation', 'new', 'event', 'events'}),
+    '\u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435':    frozenset({'management', 'manage', 'router', 'event'}),
+    '\u043a\u043e\u043d\u0444\u0435\u0440\u0435\u043d\u0446':     frozenset({'event', 'events', 'room', 'rooms'}),
+    '\u043a\u043e\u043d\u0444\u0435\u0440\u0435\u043d\u0446\u0438\u0438':   frozenset({'event', 'events', 'conference'}),
+    '\u0432\u044b\u0441\u0442\u0430\u0432\u043a\u0438':      frozenset({'event', 'events', 'exhibition'}),
+    '\u043b\u0435\u043a\u0446\u0438\u0438':        frozenset({'event', 'events', 'lecture'}),
     # Rooms
-    'помещение':     frozenset({'room', 'rooms', 'venue', 'venues', 'space'}),
-    'помещения':     frozenset({'room', 'rooms', 'venue', 'venues'}),
-    'зал':           frozenset({'room', 'rooms', 'hall', 'venue'}),
-    'рассадка':      frozenset({'seating', 'room', 'rooms', 'venue', 'layout'}),
-    'схема':         frozenset({'layout', 'schema', 'room', 'venue'}),
-    'визуализация':  frozenset({'room', 'venue', 'layout', 'display'}),
+    '\u043f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u0435':     frozenset({'room', 'rooms', 'venue', 'venues', 'space'}),
+    '\u043f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u044f':     frozenset({'room', 'rooms', 'venue', 'venues'}),
+    '\u0437\u0430\u043b':           frozenset({'room', 'rooms', 'hall', 'venue'}),
+    '\u0440\u0430\u0441\u0441\u0430\u0434\u043a\u0430':      frozenset({'seating', 'room', 'rooms', 'venue', 'layout'}),
+    '\u0441\u0445\u0435\u043c\u0430':         frozenset({'layout', 'schema', 'room', 'venue'}),
+    '\u0432\u0438\u0437\u0443\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f':  frozenset({'room', 'venue', 'layout', 'display'}),
     # Venues
-    'площадка':      frozenset({'venue', 'venues', 'location'}),
-    'площадки':      frozenset({'venue', 'venues', 'location'}),
-    'место':         frozenset({'venue', 'venues', 'location', 'place'}),
-    'места':         frozenset({'venue', 'venues', 'seats', 'location'}),
-    'проведения':    frozenset({'venue', 'venues', 'location', 'event'}),
+    '\u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0430':      frozenset({'venue', 'venues', 'location'}),
+    '\u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438':      frozenset({'venue', 'venues', 'location'}),
+    '\u043c\u0435\u0441\u0442\u043e':         frozenset({'venue', 'venues', 'location', 'place'}),
+    '\u043c\u0435\u0441\u0442\u0430':         frozenset({'venue', 'venues', 'seats', 'location'}),
+    '\u043f\u0440\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u044f':    frozenset({'venue', 'venues', 'location', 'event'}),
     # Resources
-    'ресурс':        frozenset({'resource', 'resources', 'equipment'}),
-    'ресурсы':       frozenset({'resource', 'resources', 'equipment'}),
-    'бронирование':  frozenset({'booking', 'reservation', 'resource', 'equipment'}),
-    'пересечений':   frozenset({'conflict', 'overlap', 'resource', 'booking'}),
-    'пересечения':   frozenset({'conflict', 'overlap', 'resource'}),
-    'контроль':      frozenset({'control', 'check', 'resource', 'booking'}),
+    '\u0440\u0435\u0441\u0443\u0440\u0441':        frozenset({'resource', 'resources', 'equipment'}),
+    '\u0440\u0435\u0441\u0443\u0440\u0441\u044b':       frozenset({'resource', 'resources', 'equipment'}),
+    '\u0431\u0440\u043e\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435':  frozenset({'booking', 'reservation', 'resource', 'equipment'}),
+    '\u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u0439':   frozenset({'conflict', 'overlap', 'resource', 'booking'}),
+    '\u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u044f':   frozenset({'conflict', 'overlap', 'resource'}),
+    '\u043a\u043e\u043d\u0442\u0440\u043e\u043b\u044c':      frozenset({'control', 'check', 'resource', 'booking'}),
     # Agenda
-    'программа':     frozenset({'agenda', 'program', 'schedule'}),
-    'программы':     frozenset({'agenda', 'program', 'schedule'}),
-    'регламент':     frozenset({'agenda', 'schedule', 'regulation'}),
-    'выступлений':   frozenset({'agenda', 'speaker', 'speech'}),
+    '\u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0430':     frozenset({'agenda', 'program', 'schedule'}),
+    '\u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u044b':     frozenset({'agenda', 'program', 'schedule'}),
+    '\u0440\u0435\u0433\u043b\u0430\u043c\u0435\u043d\u0442':     frozenset({'agenda', 'schedule', 'regulation'}),
+    '\u0432\u044b\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u0439':   frozenset({'agenda', 'speaker', 'speech'}),
     # Equipment
-    'оборудование':  frozenset({'equipment', 'gear', 'resource'}),
-    'оборудования':  frozenset({'equipment', 'gear', 'resource'}),
-    'внеплановые':   frozenset({'equipment', 'unplanned', 'ad-hoc'}),
-    'доступность':   frozenset({'availability', 'equipment', 'resource'}),
+    '\u043e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u0435':  frozenset({'equipment', 'gear', 'resource'}),
+    '\u043e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u044f':  frozenset({'equipment', 'gear', 'resource'}),
+    '\u0432\u043d\u0435\u043f\u043b\u0430\u043d\u043e\u0432\u044b\u0435':   frozenset({'equipment', 'unplanned', 'ad-hoc'}),
+    '\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u044c':   frozenset({'availability', 'equipment', 'resource'}),
     # Registrations
-    'регистрация':   frozenset({'registration', 'registrations', 'signup'}),
-    'регистрации':   frozenset({'registration', 'registrations', 'signup'}),
-    'участников':    frozenset({'registration', 'registrations', 'participant', 'attendee'}),
-    'участники':     frozenset({'participant', 'attendee', 'registration'}),
-    'роли':          frozenset({'role', 'roles', 'registration', 'access'}),
-    'подтверждение': frozenset({'confirmation', 'approve', 'registration'}),
+    '\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044f':   frozenset({'registration', 'registrations', 'signup'}),
+    '\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u0438':   frozenset({'registration', 'registrations', 'signup'}),
+    '\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432':    frozenset({'registration', 'registrations', 'participant', 'attendee'}),
+    '\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438':    frozenset({'participant', 'attendee', 'registration'}),
+    '\u0440\u043e\u043b\u0438':          frozenset({'role', 'roles', 'registration', 'access'}),
+    '\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435': frozenset({'confirmation', 'approve', 'registration'}),
     # Notifications
-    'уведомления':   frozenset({'notification', 'notifications', 'push', 'email'}),
-    'уведомление':   frozenset({'notification', 'notifications', 'push', 'email'}),
+    '\u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f':   frozenset({'notification', 'notifications', 'push', 'email'}),
+    '\u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u0435':   frozenset({'notification', 'notifications', 'push', 'email'}),
     'push':          frozenset({'notification', 'push'}),
     'email':         frozenset({'email', 'notification'}),
     # Media
-    'медиа':         frozenset({'media', 'gallery', 'photo', 'video'}),
-    'медиагалерея':  frozenset({'media', 'gallery', 'library'}),
-    'фото':          frozenset({'photo', 'image', 'media', 'gallery'}),
-    'видео':         frozenset({'video', 'media', 'gallery'}),
-    'галерея':       frozenset({'gallery', 'media', 'library'}),
+    '\u043c\u0435\u0434\u0438\u0430':         frozenset({'media', 'gallery', 'photo', 'video'}),
+    '\u043c\u0435\u0434\u0438\u0430\u0433\u0430\u043b\u0435\u0440\u0435\u044f':  frozenset({'media', 'gallery', 'library'}),
+    '\u0444\u043e\u0442\u043e':          frozenset({'photo', 'image', 'media', 'gallery'}),
+    '\u0432\u0438\u0434\u0435\u043e':         frozenset({'video', 'media', 'gallery'}),
+    '\u0433\u0430\u043b\u0435\u0440\u0435\u044f':       frozenset({'gallery', 'media', 'library'}),
     # Analytics
-    'аналитика':     frozenset({'analytics', 'report', 'statistics', 'stats'}),
-    'отчёт':         frozenset({'report', 'analytics', 'export'}),
-    'отчет':         frozenset({'report', 'analytics', 'export'}),
-    'статистика':    frozenset({'statistics', 'analytics', 'report'}),
-    'история':       frozenset({'history', 'log', 'order', 'analytics'}),
-    'статус':        frozenset({'status', 'order', 'state'}),
-    'заказов':       frozenset({'order', 'orders', 'history'}),
+    '\u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430':     frozenset({'analytics', 'report', 'statistics', 'stats'}),
+    '\u043e\u0442\u0447\u0451\u0442':         frozenset({'report', 'analytics', 'export'}),
+    '\u043e\u0442\u0447\u0435\u0442':         frozenset({'report', 'analytics', 'export'}),
+    '\u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430':    frozenset({'statistics', 'analytics', 'report'}),
+    '\u0438\u0441\u0442\u043e\u0440\u0438\u044f':       frozenset({'history', 'log', 'order', 'analytics'}),
+    '\u0441\u0442\u0430\u0442\u0443\u0441':        frozenset({'status', 'order', 'state'}),
+    '\u0437\u0430\u043a\u0430\u0437\u043e\u0432':       frozenset({'order', 'orders', 'history'}),
     # Export
-    'экспорт':       frozenset({'export', 'report', 'pdf', 'xlsx'}),
+    '\u044d\u043a\u0441\u043f\u043e\u0440\u0442':       frozenset({'export', 'report', 'pdf', 'xlsx'}),
     'pdf':           frozenset({'pdf', 'report', 'export'}),
     'xlsx':          frozenset({'xlsx', 'export', 'report'}),
 }
@@ -180,34 +233,17 @@ def _jaccard(a, b):
 
 
 def _topic_keywords(task_title: str) -> frozenset:
-    """
-    Return the union of all English keyword sets that map from words
-    in task_title via _KW_MAP.  Used to identify the "topic" so we can
-    find the entire thematic group, not just the single best neighbour.
-    """
     words = _normalize(task_title).split()
     result: set[str] = set()
     for word in words:
         mapped = _KW_MAP.get(word)
         if mapped:
             result |= mapped
-    # Also add the normalised task words themselves (handles EN task names)
     result |= set(words)
     return frozenset(result)
 
 
 def _keyword_overlap(task_title: str, func_name: str) -> float:
-    """
-    Cross-language similarity score in [0.0, 1.0].
-
-    1. Try Jaccard first (works for same-language pairs).
-    2. If Jaccard == 0: translate Russian words via _KW_MAP and check
-       how many translated English keywords appear in func_name tokens.
-
-    Score > 0 means "thematically related" — sufficient for placement.
-    Score always stays below _FUNC_MATCH_THRESHOLD (0.25) for cross-language
-    hits, so keyword-only matches never trigger IN-PLACE enrichment.
-    """
     jac = _jaccard(task_title, func_name)
     if jac > 0:
         return jac
@@ -231,22 +267,10 @@ def _keyword_overlap(task_title: str, func_name: str) -> float:
     if not hits:
         return 0.0
 
-    # Capped at 0.20 — always below _FUNC_MATCH_THRESHOLD so it only
-    # influences placement, never in-place matching.
     return min(len(hits) / len(translated), 0.20)
 
 
 def _find_group_end(topic_kws: frozenset, existing_funcs: list, skip_threshold: float = 0.0) -> int:
-    """
-    Given a set of topic keywords, find the maximum sequence value among
-    all existing functions whose name shares at least one token with
-    topic_kws (after normalization).
-
-    Returns the max sequence of the thematic group, or -1 if no group found.
-
-    This prevents new functions from being inserted IN THE MIDDLE of a
-    thematic group when several functions share the same topic.
-    """
     if not topic_kws or not existing_funcs:
         return -1
 
@@ -260,10 +284,6 @@ def _find_group_end(topic_kws: frozenset, existing_funcs: list, skip_threshold: 
             seq = func.sequence or 0
             if seq > group_max_seq:
                 group_max_seq = seq
-                _logger.debug(
-                    '_find_group_end: func="%s" seq=%s is in topic group (overlap=%s)',
-                    func.name, seq, overlap,
-                )
     return group_max_seq
 
 
@@ -274,47 +294,13 @@ def _find_group_end(topic_kws: frozenset, existing_funcs: list, skip_threshold: 
 class DocProjectEnricher(models.AbstractModel):
     """
     Enriches doc.module / doc.menu / doc.function records with project task data.
-
-    Key behaviour (v6)
-    ------------------
-    * Each subtask from the project is matched against EXISTING doc.function
-      records on the module by:
-        1. Exact match on source_task_id  (fast path)
-        2. Jaccard word-overlap >= 0.25 on normalised names  (same-language fuzzy)
-
-    * Match found  -> fields (description/requirements/steps/result) are
-      written ON THE EXISTING function.  Sequence / number / position
-      are NOT changed.
-
-    * No match     -> a new doc.function is created.
-      Placement uses _compute_insert_sequence (v6) which:
-        a. Finds the best single neighbour via _keyword_overlap.
-        b. Derives the topic keyword set from the task title.
-        c. Walks ALL existing functions to find the LAST one that belongs
-           to the same thematic group (_find_group_end).
-        d. Inserts AFTER the group end (group_end_seq + 10).
-      This ensures new functions always land after the WHOLE group, never
-      in the middle of it.
+    See module docstring for full description.
     """
 
     _name = 'doc.project.enricher'
     _description = 'Auto Doc - Project Task Enricher'
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
-
     def enrich_module(self, doc_module, overwrite=False):
-        """
-        Enrich a single doc.module from project task snapshots.
-
-        Returns dict with keys:
-          module_enriched    (bool)
-          menus_enriched     (int)
-          functions_enriched (int)
-          skipped            (int)
-          reason             (str)
-        """
         stats = {
             'module_enriched': False,
             'menus_enriched': 0,
@@ -337,33 +323,13 @@ class DocProjectEnricher(models.AbstractModel):
 
         if not all_snaps:
             stats['reason'] = 'no_snapshots_configured'
-            _logger.info(
-                'enrich_module: module=%s — no snapshot set configured on '
-                'generation id=%s.  Enrichment skipped.',
-                technical_name, generation.id,
-            )
             return stats
-
-        _logger.info(
-            'enrich_module: module=%s  generation=%s  total_snaps=%s',
-            technical_name, generation.id, len(all_snaps),
-        )
 
         parent_snaps = self._find_module_parent_snaps(technical_name, all_snaps)
 
         if not parent_snaps:
             stats['reason'] = 'no_matching_tasks'
-            _logger.info(
-                'enrich_module: module=%s — no tasks found with tag [%s].',
-                technical_name, technical_name,
-            )
             return stats
-
-        _logger.info(
-            'enrich_module: found %s parent snap(s) for [%s]: %s',
-            len(parent_snaps), technical_name,
-            [s.name for s in parent_snaps],
-        )
 
         Snap = self.env['doc.project.task.snapshot']
         functional_snaps = Snap.browse()
@@ -373,15 +339,9 @@ class DocProjectEnricher(models.AbstractModel):
         if not functional_snaps:
             functional_snaps = Snap.browse([s.id for s in parent_snaps])
 
-        _logger.info(
-            'enrich_module: %s functional snap(s) for [%s]',
-            len(functional_snaps), technical_name,
-        )
-
         stats['module_enriched'] = self._enrich_module_description(
             doc_module, parent_snaps[0], overwrite=overwrite
         )
-
         stats['functions_enriched'] = self._upsert_functions_from_snaps(
             doc_module, functional_snaps, overwrite=overwrite
         )
@@ -393,23 +353,10 @@ class DocProjectEnricher(models.AbstractModel):
                 stats['skipped'] += 1
 
         stats['reason'] = 'enriched'
-        _logger.info(
-            'enrich_module DONE: module=%s  enriched=%s  menus=%s  funcs=%s  skipped=%s',
-            technical_name,
-            stats['module_enriched'],
-            stats['menus_enriched'],
-            stats['functions_enriched'],
-            stats['skipped'],
-        )
         return stats
-
-    # ------------------------------------------------------------------ #
-    # Snapshot loading                                                     #
-    # ------------------------------------------------------------------ #
 
     def _load_snaps_for_generation(self, generation):
         Snap = self.env['doc.project.task.snapshot']
-
         snapshot_set = getattr(generation, 'snapshot_set_id', None)
         if snapshot_set and snapshot_set.id:
             snaps = Snap.search(
@@ -417,26 +364,11 @@ class DocProjectEnricher(models.AbstractModel):
                 order='depth asc, sequence asc, id asc',
             )
             if snaps:
-                _logger.info(
-                    '_load_snaps: global set id=%s  %s snaps',
-                    snapshot_set.id, len(snaps),
-                )
                 return snaps
-
-        snaps = Snap.search(
+        return Snap.search(
             [('generation_id', '=', generation.id)],
             order='depth asc, sequence asc, id asc',
         )
-        if snaps:
-            _logger.info(
-                '_load_snaps: legacy per-gen snaps  gen=%s  %s snaps',
-                generation.id, len(snaps),
-            )
-        return snaps
-
-    # ------------------------------------------------------------------ #
-    # Task -> module matching                                              #
-    # ------------------------------------------------------------------ #
 
     def _find_module_parent_snaps(self, technical_name, all_snaps):
         result = [
@@ -447,36 +379,18 @@ class DocProjectEnricher(models.AbstractModel):
             result.sort(key=lambda s: -len(s.child_snapshot_ids))
         return result
 
-    # ------------------------------------------------------------------ #
-    # doc.function upsert — IN-PLACE MATCHING + SMART GROUP PLACEMENT (v6)#
-    # ------------------------------------------------------------------ #
-
     def _upsert_functions_from_snaps(self, doc_module, functional_snaps, overwrite=False):
-        """
-        Match each subtask snapshot to an existing doc.function by name
-        similarity (Jaccard >= 0.25).  If matched, enrich IN-PLACE
-        (sequence/position unchanged).
-
-        If NOT matched, create a new function inserted AFTER THE LAST
-        FUNCTION IN THE THEMATIC GROUP using _compute_insert_sequence (v6).
-
-        Returns the count of functions enriched or created.
-        """
         if not functional_snaps:
             return 0
 
         existing_funcs = list(doc_module.function_ids)
-
-        # Build index by source_task_id for exact match (fast path)
         existing_by_task_id = {}
         for func in existing_funcs:
             key = getattr(func, 'source_task_id', 0) or 0
             if key:
                 existing_by_task_id[key] = func
 
-        # Max sequence for fallback (no thematic neighbour found)
         max_seq = max((f.sequence or 0 for f in existing_funcs), default=0)
-
         count = 0
         matched_func_ids = set()
 
@@ -499,12 +413,10 @@ class DocProjectEnricher(models.AbstractModel):
 
             task_id = snap.original_task_id or 0
 
-            # --- Step 1: exact match by source_task_id ---
             func = existing_by_task_id.get(task_id)
             if func and func.id in matched_func_ids:
                 func = None
 
-            # --- Step 2: fuzzy match by name (Jaccard only, no cross-lang) ---
             if not func:
                 func = self._match_func_by_name(
                     title, existing_funcs, matched_func_ids,
@@ -512,7 +424,6 @@ class DocProjectEnricher(models.AbstractModel):
                 )
 
             if func:
-                # ENRICH IN-PLACE — never change sequence / number
                 matched_func_ids.add(func.id)
                 updates = {}
                 if (overwrite or not func.description) and desc:
@@ -529,20 +440,8 @@ class DocProjectEnricher(models.AbstractModel):
                 if updates:
                     func.write(updates)
                     count += 1
-                    _logger.info(
-                        '_upsert_functions: IN-PLACE  task="%s" -> func="%s" (id=%s)',
-                        title, func.name, func.id,
-                    )
-                else:
-                    _logger.debug(
-                        '_upsert_functions: matched func id=%s already fully populated',
-                        func.id,
-                    )
             else:
-                # No match — compute smart group-end placement
                 insert_seq = self._compute_insert_sequence(title, existing_funcs, max_seq)
-
-                # Shift all functions at or after insert_seq to make room
                 for ef in existing_funcs:
                     if (ef.sequence or 0) >= insert_seq:
                         ef.write({'sequence': (ef.sequence or 0) + 10})
@@ -567,34 +466,12 @@ class DocProjectEnricher(models.AbstractModel):
                 existing_funcs.append(new_func)
                 max_seq = max(max_seq, insert_seq)
                 count += 1
-                _logger.info(
-                    '_upsert_functions: NEW FUNC  task="%s"  seq=%s',
-                    title, insert_seq,
-                )
 
-        _logger.info(
-            '_upsert_functions_from_snaps: module=%s  enriched/created=%s',
-            doc_module.technical_name, count,
-        )
         return count
 
     def _compute_insert_sequence(self, task_title: str, existing_funcs: list, max_seq: int) -> int:
-        """
-        Compute sequence for a new function so it lands AFTER the entire
-        thematic group that best matches the task title.
-
-        Algorithm (v6)
-        --------------
-        1. Find the single best-scoring neighbour via _keyword_overlap.
-        2. Derive the topic keyword set (_topic_keywords) from task_title.
-        3. Find the LAST function in that topic group (_find_group_end).
-        4. Insert at group_end + 10.
-
-        Falls back to max_seq + 10 when no thematic neighbour is found.
-        """
         best_func = None
         best_score = 0.0
-
         for func in existing_funcs:
             score = _keyword_overlap(task_title, func.name or '')
             if score > best_score:
@@ -602,40 +479,15 @@ class DocProjectEnricher(models.AbstractModel):
                 best_func = func
 
         if not best_func or best_score <= _PLACEMENT_THRESHOLD:
-            fallback = max_seq + 10
-            _logger.debug(
-                '_compute_insert_sequence: "%s" -> no neighbour, fallback seq=%s',
-                task_title, fallback,
-            )
-            return fallback
+            return max_seq + 10
 
-        # Derive the topic keyword set from the task title
         topic_kws = _topic_keywords(task_title)
-
-        # Find the LAST function in the thematic group
         group_end_seq = _find_group_end(topic_kws, existing_funcs)
-
         if group_end_seq < 0:
-            # _find_group_end found nothing — fall back to best neighbour seq
             group_end_seq = best_func.sequence or 0
-
-        insert_seq = group_end_seq + 10
-        _logger.debug(
-            '_compute_insert_sequence: "%s" -> best_neighbour="%s" '
-            'group_end_seq=%s -> insert at %s',
-            task_title, best_func.name, group_end_seq, insert_seq,
-        )
-        return insert_seq
+        return group_end_seq + 10
 
     def _match_func_by_name(self, task_title, existing_funcs, already_matched, threshold):
-        """
-        Find the best-matching doc.function for a task title using Jaccard
-        word-overlap on normalised names.
-
-        Only same-language pairs (both RU or both EN) benefit from this;
-        cross-language matching is intentionally NOT done here — use
-        _keyword_overlap for placement only.
-        """
         best_func = None
         best_score = 0.0
         for func in existing_funcs:
@@ -646,16 +498,8 @@ class DocProjectEnricher(models.AbstractModel):
                 best_score = score
                 best_func = func
         if best_func and best_score >= threshold:
-            _logger.debug(
-                '_match_func_by_name: "%s" -> "%s"  score=%.2f',
-                task_title, best_func.name, best_score,
-            )
             return best_func
         return None
-
-    # ------------------------------------------------------------------ #
-    # Menu caption enrichment (best-effort)                                #
-    # ------------------------------------------------------------------ #
 
     def _enrich_menu_caption(self, menu, snaps, overwrite=False, threshold=0.15):
         if not overwrite:
@@ -665,14 +509,10 @@ class DocProjectEnricher(models.AbstractModel):
             if src == 'task' and menu.caption:
                 return False
 
-        best_snap, _score = self._best_snap_match(
-            menu.name or '', snaps, threshold=threshold
-        )
+        best_snap, _score = self._best_snap_match(menu.name or '', snaps, threshold=threshold)
         if not best_snap:
             last_seg = (menu.complete_name or '').split('/')[-1].strip()
-            best_snap, _score = self._best_snap_match(
-                last_seg, snaps, threshold=threshold
-            )
+            best_snap, _score = self._best_snap_match(last_seg, snaps, threshold=threshold)
         if not best_snap:
             return False
 
@@ -703,10 +543,6 @@ class DocProjectEnricher(models.AbstractModel):
             return best_snap, best_score
         return None, 0.0
 
-    # ------------------------------------------------------------------ #
-    # Module description                                                   #
-    # ------------------------------------------------------------------ #
-
     def _enrich_module_description(self, doc_module, parent_snap, overwrite=False):
         if doc_module.description and not overwrite:
             return False
@@ -718,22 +554,21 @@ class DocProjectEnricher(models.AbstractModel):
         doc_module.write({'description': raw_desc})
         return True
 
-    # ------------------------------------------------------------------ #
-    # Section parser                                                       #
-    # ------------------------------------------------------------------ #
-
     def _parse_subtask_sections(self, plain_text):
         """
         Split plain text into structured documentation sections.
 
-        Recognised Russian section headers (case-insensitive):
+        Recognised section headers (case-insensitive, Russian):
           Описание   -> 'description'
           Требования -> 'requirements'
-          Порядок    -> 'steps'
+          Порядок   -> 'steps'
           Результат  -> 'result'
 
-        Lines under «ЧТО СДЕЛАТЬ» / «ЧТО НУЖНО СДЕЛАТЬ» are discarded
-        — they are implementation notes, not documentation content.
+        Lines matching _NOISE_LINE_PATTERNS are silently discarded from
+        every bucket — they are implementation artefacts, not user docs.
+        This works generically for ANY addon, not just dpf_events.
+
+        Lines under «ЧТО СДЕЛАТЬ» / «ЧТО НУЖНО СДЕЛАТЬ» are also discarded.
         """
         result = {'description': '', 'requirements': '', 'steps': '', 'result': ''}
         if not plain_text:
@@ -760,6 +595,7 @@ class DocProjectEnricher(models.AbstractModel):
         buckets      = {k: [] for k in result}
 
         for line in plain_text.splitlines():
+            # --- Section header detection ---
             m = _SECTION_DETECT.match(line)
             if m:
                 raw_key = m.group('key').strip().lower()
@@ -776,9 +612,20 @@ class DocProjectEnricher(models.AbstractModel):
 
             if discard_mode:
                 continue
+
+            # --- Noise-line filter (generic, works for any addon) ---
+            if _is_noise_line(line):
+                _logger.debug('_parse_subtask_sections: discarded noise line: %r', line)
+                continue
+
             buckets[current_key].append(line)
 
+        # Strip leading/trailing blank lines from each bucket
         for k, bucket in buckets.items():
+            while bucket and not bucket[0].strip():
+                bucket.pop(0)
+            while bucket and not bucket[-1].strip():
+                bucket.pop()
             result[k] = '\n'.join(bucket).strip()
 
         if not any([result['requirements'], result['steps'], result['result']]):
