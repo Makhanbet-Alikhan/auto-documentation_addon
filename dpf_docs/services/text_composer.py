@@ -7,49 +7,19 @@ Key design decisions
 --------------------
 * System fields (id, create_date, message_*, activity_*) are EXCLUDED from
   every user-facing section.
+* Website/SEO/portal fields injected by Odoo mixins are also excluded.
+* Field filtering is centralised in model_doc_utils.is_user_visible_candidate
+  — no local _SYSTEM_FIELDS copy in this module.
 * Computed and readonly fields are excluded from the editable field table.
 * Business-logic (workflow states, action buttons, constraints) gets its own
   dedicated section so users understand what the system does automatically.
 * The primary model drives the module description.
-
-v2 improvements
----------------
-* compose_business_logic_section — now renders an ASCII workflow diagram
-  (e.g. [Draft] → [Confirmed] → [Done]) and a "Validation rules" subsection
-  derived from @api.constrains discoveries in the introspector.
-* compose_integrations_section — new function that turns the
-  integrations_json blob into readable prose for the Word export.
-* compose_embedded_models_section — new function that renders One2many
-  child models (embedded tabular parts) as a short description block.
 """
 import logging
 
-_logger = logging.getLogger(__name__)
+from .model_doc_utils import is_user_visible_candidate
 
-_SYSTEM_FIELDS: frozenset = frozenset({
-    "id", "display_name",
-    "create_uid", "create_date", "write_uid", "write_date", "__last_update",
-    "message_ids", "message_follower_ids", "message_partner_ids",
-    "message_is_follower", "message_unread_counter", "message_attachment_count",
-    "message_has_error", "message_has_error_counter",
-    "message_needaction", "message_needaction_counter",
-    "message_main_attachment_id",
-    "activity_ids", "activity_state", "activity_user_id", "activity_type_id",
-    "activity_type_icon", "activity_date_deadline", "my_activity_date_deadline",
-    "activity_summary", "activity_exception_decoration", "activity_exception_icon",
-    "activity_count",
-    "website_message_ids", "has_message",
-    "message_has_sms_error",
-    "rating_ids", "rating_last_value", "rating_avg",
-    "sequence",
-    # website.published.mixin
-    "website_published", "is_published", "website_url",
-    "cover_properties", "header_visible", "footer_visible",
-    "can_publish", "website_id", "website_description",
-    # standard technical
-    "active", "color", "priority",
-    "access_token", "access_warning",
-})
+_logger = logging.getLogger(__name__)
 
 _TYPE_LABELS: dict = {
     "char":      "текст",
@@ -108,7 +78,7 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=N
     """Описать экран для пользователя.
 
     Only includes USER-INPUT fields in the key-fields summary.
-    Appends access groups when available.
+    Uses is_user_visible_candidate from model_doc_utils as single source of truth.
     """
     view_labels = {
         "list":     "список",
@@ -128,10 +98,11 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=N
 
     input_labels = []
     for fname, meta in (fields_meta or {}).items():
-        if fname.startswith("_") or fname in _SYSTEM_FIELDS:
-            continue
         meta = meta or {}
-        if meta.get("compute") or meta.get("readonly"):
+        # Use the same filter as field tables — single source of truth
+        field_info = dict(meta)
+        field_info["name"] = fname
+        if not is_user_visible_candidate(field_info):
             continue
         label = meta.get("string") or fname
         input_labels.append(label)
@@ -155,16 +126,18 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=N
 def compose_field_table_rows(fields_meta, field_comments=None):
     """Вернуть строки для таблицы редактируемых полей.
 
-    USER-INPUT ONLY: excludes system, computed, and readonly fields.
+    USER-INPUT ONLY: uses is_user_visible_candidate from model_doc_utils
+    as the single source of truth for field filtering.
     Rows are returned unsorted; caller should sort required-first.
     """
     field_comments = field_comments or {}
     rows = []
     for fname, meta in sorted((fields_meta or {}).items()):
-        if fname.startswith("_") or fname in _SYSTEM_FIELDS:
-            continue
         meta = meta or {}
-        if meta.get("compute") or meta.get("readonly"):
+        # Build a unified field_info dict for the shared filter
+        field_info = dict(meta)
+        field_info["name"] = fname
+        if not is_user_visible_candidate(field_info):
             continue
 
         ftype = meta.get("type") or ""
@@ -200,11 +173,9 @@ def compose_business_logic_section(business_logic, module_name=""):
     if states:
         lines.append("Статусы записи:")
         if len(states) <= 7:
-            # ASCII diagram: [Draft] → [Confirmed] → [Done]
             parts = ["[%s]" % label for val, label in states]
             lines.append("  " + " → ".join(parts))
         else:
-            # Long list: bullet per state
             for val, label in states:
                 lines.append("  • %s" % label)
         lines.append("")
@@ -241,23 +212,7 @@ def compose_business_logic_section(business_logic, module_name=""):
 
 
 def compose_integrations_section(integrations):
-    """Составить текст раздела внешних интеграций для документа.
-
-    ``integrations`` is the list produced by
-    ``DocGeneration._build_service_integrations`` and stored in
-    ``doc.module.integrations_json``.  Each item:
-
-        {
-            "file": "minio_service.py",
-            "subdir": "services",
-            "doc": "<module docstring>",
-            "types": ["MinIO / S3", "HTTP POST"],
-            "classes": ["MinioService"],
-        }
-
-    Returns plain text (no Markdown) suitable for insertion into a Word
-    paragraph or a Markdown block.
-    """
+    """Составить текст раздела внешних интеграций для документа."""
     if not integrations:
         return ""
 
@@ -275,7 +230,6 @@ def compose_integrations_section(integrations):
         header = "• %s (%s/%s)" % (type_str, subdir, file_name)
         lines.append(header)
         if doc:
-            # Show only first sentence of the docstring (up to 200 chars)
             first_sentence = doc.split("\n")[0][:200]
             lines.append("  %s" % first_sentence)
         lines.append("")
@@ -284,18 +238,7 @@ def compose_integrations_section(integrations):
 
 
 def compose_embedded_models_section(embedded_models):
-    """Описать встроенные табличные части формы (One2many-дочерние модели).
-
-    ``embedded_models`` is the list returned by
-    ``DocIntrospector.get_embedded_models``.  Each item:
-
-        {
-            "field": "schedule_line_ids",
-            "field_label": "Расписание",
-            "model": "some.schedule.line",
-            "name": "Schedule Lines",
-        }
-    """
+    """Описать встроенные табличные части формы (One2many-дочерние модели)."""
     if not embedded_models:
         return ""
 
