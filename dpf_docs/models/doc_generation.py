@@ -15,6 +15,7 @@ User-orientation improvements (v7)
   ALL user-facing sections (field table, menu captions, function steps).
 * Access groups are collected from menus and rendered as «Доступен для:».
 * The Appendix field table is sorted: required fields first, then optional.
+* compact_field_table trims inherited-model noise to max 15 key fields.
 """
 import base64
 import logging
@@ -23,6 +24,7 @@ from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 from ..services import text_composer
+from ..services.model_doc_utils import compact_field_table
 
 _logger = logging.getLogger(__name__)
 
@@ -252,6 +254,17 @@ class DocGeneration(models.Model):
             field_comments = self._guess_field_comments(parsed, res_model)
             rows = text_composer.compose_field_table_rows(user_fields_meta, field_comments)
             rows.sort(key=lambda r: (0 if r.get("required") else 1, r.get("label", "")))
+
+            # Trim to the most relevant user-facing fields.
+            # compact_field_table removes remaining noise (website/SEO/portal
+            # fields on inherited Odoo models) and caps the list at max_fields.
+            rows = compact_field_table(
+                rows,
+                module_name=module_name,
+                model_names=[res_model],
+                max_fields=15,
+            )
+
             description = text_composer.compose_model_description(
                 res_model, class_doc, {r["name"]: r["help"] for r in rows}
             )
