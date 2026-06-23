@@ -6,9 +6,11 @@ Group-1 fix (generic):
   prefix-based names so no addon leaks chatter fields into docs.
 - get_user_input_fields now also excludes non-stored computed fields and
   related-readonly fields (they are rarely useful in user manuals).
-- New method: get_module_model_names(module_name) returns technical names of ALL
+- get_module_model_names(module_name) returns technical names of ALL
   models registered by a given addon — both top-level own models AND inherited
   extensions. Used by doc_generation to build a complete model coverage list.
+- get_primary_model() and get_module_models() retained for backward-compat
+  with doc_generation.py callers.
 """
 import logging
 import re
@@ -161,15 +163,16 @@ class DocIntrospector(models.AbstractModel):
             and not _is_user_input(fname, meta or {})
         }
 
+    # ------------------------------------------------------------------
+    # Module-level model discovery
+    # ------------------------------------------------------------------
+
     @api.model
     def get_module_model_names(self, module_name):
         """Return all ir.model technical names registered by this addon.
 
-        This covers BOTH:
-          - own models (_name defined in the addon)
-          - inherited extensions (_inherit applied in the addon)
-        Useful for building a complete model coverage list without relying on
-        menu discovery alone — so models without menus are never silently omitted.
+        Covers BOTH own models (_name) and inherited extensions (_inherit).
+        Models without menus are included — never silently omitted.
         """
         imd = self.env["ir.model.data"].search([
             ("module", "=", module_name),
@@ -180,6 +183,68 @@ class DocIntrospector(models.AbstractModel):
             return []
         records = self.env["ir.model"].browse(model_ids).exists()
         return [r.model for r in records]
+
+    @api.model
+    def get_module_models(self, module_name):
+        """Return list of dicts {model, name, transient} for all addon models.
+
+        Backward-compatible with doc_generation._build_models() caller.
+        Internally delegates to get_module_model_names() for filtering.
+        """
+        model_names = self.get_module_model_names(module_name)
+        if not model_names:
+            return []
+        ir_models = self.env["ir.model"].search(
+            [("model", "in", model_names)]
+        )
+        return [
+            {"model": m.model, "name": m.name, "transient": m.transient}
+            for m in ir_models
+        ]
+
+    @api.model
+    def get_primary_model(self, module_name):
+        """Detect the single most important (primary) model of an addon.
+
+        Algorithm:
+          1. Collect all non-transient models of the addon.
+          2. If only one — return it.
+          3. Otherwise pick the model most referenced via Many2one by others
+             in the same addon (highest fan-in). Ties broken alphabetically.
+        """
+        models_info = self.get_module_models(module_name)
+        if not models_info:
+            return None
+        non_transient = [m for m in models_info if not m.get("transient")]
+        if not non_transient:
+            return models_info[0]["model"]
+        if len(non_transient) == 1:
+            return non_transient[0]["model"]
+
+        model_names = {m["model"] for m in non_transient}
+        fan_in = {m: 0 for m in model_names}
+        for minfo in non_transient:
+            res_model = minfo["model"]
+            if res_model not in self.env:
+                continue
+            try:
+                meta = self.env[res_model].fields_get(
+                    attributes=["type", "relation"]
+                )
+            except Exception:
+                continue
+            for fmeta in meta.values():
+                if fmeta.get("type") == "many2one":
+                    rel = fmeta.get("relation")
+                    if rel and rel in fan_in:
+                        fan_in[rel] += 1
+
+        primary = max(fan_in, key=fan_in.get)
+        return primary if fan_in[primary] > 0 else sorted(model_names)[0]
+
+    # ------------------------------------------------------------------
+    # Business logic introspection
+    # ------------------------------------------------------------------
 
     @api.model
     def get_business_logic(self, res_model):
