@@ -16,6 +16,8 @@ User-orientation improvements (v7)
 * Access groups are collected from menus and rendered as «Доступен для:».
 * The Appendix field table is sorted: required fields first, then optional.
 * compact_field_table trims inherited-model noise to max 15 key fields.
+* _build_menus now also applies compact_field_table(max_fields=12) to
+  fields_meta_json so function steps never list more than 12 fields.
 """
 import base64
 import logging
@@ -223,7 +225,28 @@ class DocGeneration(models.Model):
         nodes = introspector.get_menu_tree(module_name)
         for node in nodes:
             res_model = node.get("res_model")
-            fields_meta = introspector.get_user_input_fields(res_model) if res_model else {}
+            raw_fields_meta = introspector.get_user_input_fields(res_model) if res_model else {}
+
+            # Apply compact_field_table so that function steps generated from
+            # fields_meta_json never exceed 12 fields. Without this, models
+            # like event.track produced 50+ steps (website/SEO fields included).
+            if raw_fields_meta:
+                field_rows = list(raw_fields_meta.values()) if isinstance(raw_fields_meta, dict) else raw_fields_meta
+                compacted = compact_field_table(
+                    field_rows,
+                    module_name=module_name,
+                    model_names=[res_model] if res_model else None,
+                    max_fields=12,
+                )
+                # Rebuild as dict keyed by field name if original was a dict
+                if isinstance(raw_fields_meta, dict):
+                    compacted_names = {r.get("name") for r in compacted}
+                    fields_meta = {k: v for k, v in raw_fields_meta.items() if k in compacted_names}
+                else:
+                    fields_meta = compacted
+            else:
+                fields_meta = raw_fields_meta
+
             groups = node.get("groups") or []
             caption = text_composer.compose_menu_caption(
                 node["name"], res_model, node.get("view_modes"), fields_meta, groups
