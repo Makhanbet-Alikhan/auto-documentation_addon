@@ -123,15 +123,7 @@ class DocModule(models.Model):
         return bool(cr.fetchone())
 
     def _get_own_models(self):
-        """Return set of model technical names that belong to this addon.
-
-        Uses three complementary strategies:
-        1. ir_model_module relation table (most precise).
-        2. LIKE prefix scan — tries both the naive replace and the singular
-           variant to handle plurality (dpf_events -> dpf.event.*).
-        3. Exact match scan — catches root models like dpf.event that are
-           NOT matched by the 'dpf.event.%' LIKE pattern.
-        """
+        """Return set of model technical names that belong to this addon."""
         module_name = self.technical_name
         if not module_name:
             return set()
@@ -139,7 +131,6 @@ class DocModule(models.Model):
         own = set()
         cr = self.env.cr
 
-        # Strategy 1: relation table
         for rel_table in ("ir_model_module", "ir_module_module_model_ids_rel"):
             if not self._table_exists(cr, rel_table):
                 continue
@@ -158,7 +149,6 @@ class DocModule(models.Model):
                 own = {r[0] for r in rows}
                 break
 
-        # Strategy 2: LIKE prefix variants
         prefixes = set()
         naive = module_name.replace("_", ".") + ".%"
         prefixes.add(naive)
@@ -173,7 +163,6 @@ class DocModule(models.Model):
             cr.execute("SELECT model FROM ir_model WHERE model LIKE %s", (prefix,))
             own |= {r[0] for r in cr.fetchall()}
 
-        # Strategy 3: exact root model match (e.g. dpf.event from dpf_events)
         exact_candidates = set()
         exact_candidates.add(module_name.replace("_", "."))
         if module_name.endswith("s"):
@@ -204,7 +193,6 @@ class DocModule(models.Model):
         return {m for m in own if m}
 
     def _detect_action_buttons(self, model_name, state_field_name):
-        """Return dict {target_state: button_label} by inspecting action_* methods."""
         btn_map = {}
         try:
             import inspect
@@ -237,15 +225,12 @@ class DocModule(models.Model):
         return btn_map
 
     def _detect_transitions(self, model_name, state_field_name, selection):
-        """Build a best-effort transition map {from_state: [to_states]}."""
         state_values = [v for v, _ in selection]
         transition_map = {v: [] for v in state_values}
 
-        # Forward transitions from selection order
         for i, value in enumerate(state_values[:-1]):
             transition_map[value].append(state_values[i + 1])
 
-        # Augment with transitions detected from action_* method sources
         try:
             import inspect
             model_cls = type(self.env[model_name])
@@ -276,7 +261,6 @@ class DocModule(models.Model):
         return transition_map
 
     def _populate_workflow_states(self):
-        """Detect selection-based workflows for the module's own models."""
         self.ensure_one()
         self.workflow_state_ids.unlink()
         model_names = self._get_module_models()
@@ -337,7 +321,6 @@ class DocModule(models.Model):
         cr = self.env.cr
         by_model = {}
 
-        # Strategy 1: ir_model_data lookup
         cr.execute(
             """
             SELECT res_id
@@ -356,7 +339,6 @@ class DocModule(models.Model):
                     continue
                 by_model.setdefault(f.model, []).append(f)
 
-        # Strategy 2: name-prefix fallback
         if not by_model:
             prefix = module_name + "_%"
             own_dot_prefix = module_name.replace("_", ".") + "."
@@ -370,6 +352,49 @@ class DocModule(models.Model):
 
         return by_model
 
+    # System/chatter field names to skip in section 4
+    _SECTION4_SKIP_NAMES = frozenset({
+        'id', 'display_name', '__last_update',
+        'create_uid', 'create_date', 'write_uid', 'write_date',
+        # mail.thread
+        'message_is_follower', 'message_follower_ids', 'message_partner_ids',
+        'message_ids', 'has_message', 'message_needaction',
+        'message_needaction_counter', 'message_has_error',
+        'message_has_error_counter', 'message_attachment_count',
+        'message_main_attachment_id', 'message_unread_counter',
+        'message_bounce', 'message_has_sms_error', 'website_message_ids',
+        # mail.activity.mixin
+        'activity_ids', 'activity_state', 'activity_user_id',
+        'activity_type_id', 'activity_type_icon', 'activity_date_deadline',
+        'my_activity_date_deadline', 'activity_summary',
+        'activity_exception_decoration', 'activity_exception_icon',
+        'activity_count',
+        # portal / access
+        'access_url', 'access_token', 'access_warning',
+        # rating
+        'rating_ids', 'rating_last_value', 'rating_avg',
+        # website
+        'website_published', 'is_published', 'can_publish',
+        'website_url', 'website_id',
+        'website_meta_title', 'website_meta_description',
+        'website_meta_keywords', 'website_meta_og_img',
+        'seo_name', 'website_slug', 'website_indexed',
+        'is_seo_optimized', 'footer_visible', 'header_visible',
+    })
+    _SECTION4_SKIP_PREFIXES = (
+        'message_', 'activity_', 'website_message_', '__',
+        'website_meta_', 'seo_',
+    )
+
+    def _is_section4_skip(self, field_rec):
+        """Return True for system/chatter/website fields to exclude from section 4."""
+        name = field_rec.name or ''
+        if name in self._SECTION4_SKIP_NAMES:
+            return True
+        if any(name.startswith(p) for p in self._SECTION4_SKIP_PREFIXES):
+            return True
+        return False
+
     def _populate_inherited_models(self):
         """Detect models extended via _inherit for this addon."""
         self.ensure_one()
@@ -378,12 +403,17 @@ class DocModule(models.Model):
         by_model = self._get_module_field_models()
 
         for base_model, field_list in by_model.items():
+            # Filter out system / chatter / website fields
+            business_fields = [f for f in field_list if not self._is_section4_skip(f)]
+            if not business_fields:
+                continue  # skip model entirely if nothing left
+
             inherited = self.env["doc.inherited.model"].create({
                 "doc_module_id": self.id,
                 "base_model": base_model,
             })
             seq = 10
-            for f in field_list:
+            for f in business_fields:
                 self.env["doc.inherited.field"].create({
                     "inherited_model_id": inherited.id,
                     "sequence": seq,
@@ -396,7 +426,6 @@ class DocModule(models.Model):
                 seq += 10
 
     def _populate_export_actions(self):
-        """Detect report/export actions registered by this addon."""
         self.ensure_one()
         self.export_action_ids.unlink()
 
@@ -450,7 +479,6 @@ class DocModule(models.Model):
                 seq += 10
 
     def _populate_analytic_fields(self):
-        """Detect computed, non-stored fields as analytic/KPI fields."""
         self.ensure_one()
         self.analytic_field_ids.unlink()
 
@@ -492,7 +520,6 @@ class DocModule(models.Model):
             seq += 10
 
     def _populate_integrations(self):
-        """Best-effort detection of external integrations via ir.config_parameter."""
         self.ensure_one()
         self.integration_ids.unlink()
 
@@ -525,11 +552,7 @@ class DocModule(models.Model):
             seq += 10
 
     def auto_populate_extensions(self):
-        """Populate sections 3-5 and 7 automatically from ORM introspection.
-
-        Called automatically during action_collect() and action_download_word().
-        No manual trigger needed.
-        """
+        """Populate sections 3-5 and 7 automatically from ORM introspection."""
         self.ensure_one()
         self._populate_workflow_states()
         self._populate_inherited_models()
@@ -652,7 +675,6 @@ class DocModule(models.Model):
         ]
 
     def action_render_markdown(self):
-        """Recompute Markdown."""
         self.ensure_one()
         try:
             md = self.env["doc.generation"]._render_markdown(self)
@@ -677,14 +699,13 @@ class DocModule(models.Model):
             "tag": "display_notification",
             "params": {
                 "title": _("Markdown"),
-                "message": _("Маркдаун сгенерирован."),
+                "message": _("\u041c\u0430\u0440\u043a\u0434\u0430\u0443\u043d \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u043d."),
                 "type": "success",
                 "sticky": False,
             },
         }
 
     def action_enrich_from_snapshot(self):
-        """Button: enrich this module from the project snapshot."""
         self.ensure_one()
         generation = self.generation_id
         if not generation or not generation.snapshot_set_id:
@@ -694,8 +715,8 @@ class DocModule(models.Model):
                 "params": {
                     "title": _("Project Snapshot"),
                     "message": _(
-                        "В генерации не указан Snapshot Set. "
-                        "Откройте запись генерации и выберите Project Snapshot Set."
+                        "\u0412 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d Snapshot Set. "
+                        "\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044c \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 Project Snapshot Set."
                     ),
                     "type": "warning",
                     "sticky": True,
@@ -703,11 +724,11 @@ class DocModule(models.Model):
             }
         stats = self.env["doc.project.enricher"].enrich_module(self, overwrite=False)
         if stats["reason"] == "no_matching_tasks":
-            msg = _("Задач с тегом [%s] не найдено.") % self.technical_name
+            msg = _("\u0417\u0430\u0434\u0430\u0447 \u0441 \u0442\u0435\u0433\u043e\u043c [%s] \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e.") % self.technical_name
             notif_type = "warning"
         elif stats["reason"] == "enriched":
             msg = _(
-                "Обогащено: функций %s, меню %s."
+                "\u041e\u0431\u043e\u0433\u0430\u0449\u0435\u043d\u043e: \u0444\u0443\u043d\u043a\u0446\u0438\u0439 %s, \u043c\u0435\u043d\u044e %s."
             ) % (stats["functions_enriched"], stats["menus_enriched"])
             notif_type = "success"
         else:
