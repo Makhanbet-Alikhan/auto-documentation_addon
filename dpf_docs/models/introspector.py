@@ -6,6 +6,8 @@ Group-1 fix (generic):
   prefix-based names so no addon leaks chatter fields into docs.
 - get_user_input_fields now also excludes non-stored computed fields and
   related-readonly fields (they are rarely useful in user manuals).
+- _ODOO_INTERNAL_FIELDS / _ODOO_INTERNAL_PREFIXES filter website/SEO/portal
+  fields that Odoo injects via _inherit but users never fill in back-office.
 - get_module_model_names(module_name) returns technical names of ALL
   models registered by a given addon — both top-level own models AND inherited
   extensions. Used by doc_generation to build a complete model coverage list.
@@ -40,6 +42,46 @@ _SYSTEM_PREFIXES = (
     "message_", "activity_", "website_message_", "__",
 )
 
+# Fields injected by Odoo's website/SEO/portal mixins that are never
+# relevant in a back-office user manual.  These are NOT system fields
+# (they can be readonly=False) but they have no place in function steps
+# or field tables for ordinary business modules.
+_ODOO_INTERNAL_FIELDS: frozenset = frozenset({
+    # --- website.published.mixin / website.seo.metadata ---
+    "website_published", "is_published", "can_publish",
+    "website_url", "website_id",
+    "website_meta_title", "website_meta_description",
+    "website_meta_keywords", "website_meta_og_img",
+    "seo_name", "website_slug",
+    "website_indexed",
+    # --- website views / layout ---
+    "footer_visible", "header_visible",
+    "website_published", "is_seo_optimized",
+    # --- portal mixin ---
+    "access_url", "access_token", "access_warning",
+    # --- mail.thread / mail.activity.mixin (belt-and-suspenders) ---
+    "message_bounce", "email_normalized",
+    # --- visible_on_website / website track fields ---
+    "website_image", "website_image_url",
+    "tag_ids",  # generic many2many tag, usually a UI widget not a form field
+    # --- always-wishlisted / magic button (event.track specific) ---
+    "always_wishlisted", "magic_button", "show_button",
+    "button_title", "button_target_url",
+    # --- speaker / bio (website-facing, not back-office) ---
+    "biography", "speaker_photo",
+    "job_position", "company_name",
+    # --- kanban color (UI only) ---
+    "color", "kanban_state",
+    # --- ir.attachment helpers ---
+    "attachment_ids",
+})
+
+_ODOO_INTERNAL_PREFIXES = (
+    "website_",   # website_meta_*, website_slug, website_published, ...
+    "seo_",       # seo_name, seo_optimized, ...
+    "is_seo_",
+)
+
 
 def _is_system_field(fname: str, meta: dict) -> bool:
     if fname.startswith("_"):
@@ -51,8 +93,19 @@ def _is_system_field(fname: str, meta: dict) -> bool:
     return False
 
 
+def _is_odoo_internal_field(fname: str) -> bool:
+    """Return True for website/SEO/portal fields injected by Odoo mixins."""
+    if fname in _ODOO_INTERNAL_FIELDS:
+        return True
+    if any(fname.startswith(p) for p in _ODOO_INTERNAL_PREFIXES):
+        return True
+    return False
+
+
 def _is_user_input(fname: str, meta: dict) -> bool:
     if _is_system_field(fname, meta):
+        return False
+    if _is_odoo_internal_field(fname):
         return False
     # non-stored computes are never user-editable
     if meta.get("compute") and not meta.get("store"):
@@ -90,7 +143,7 @@ class DocIntrospector(models.AbstractModel):
             group_names = []
             menu_groups = (
                 getattr(menu, "group_ids", False)
-                or getattr(menu, "groups_id", False)
+                or getattr(menu, "group_ids", False)
                 or []
             )
             for g in menu_groups:
