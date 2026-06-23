@@ -1,23 +1,13 @@
 # -*- coding: utf-8 -*-
 """Generation orchestrator.
 
-Coordinates the full documentation pipeline:
-  1. collect  — introspect ORM, parse source, build doc.module / menus / models
-  2. enrich   — optionally overlay project task data from a snapshot set
-  3. render   — produce Markdown and Word export
-
-User-orientation improvements (v7)
------------------------------------
-* Primary model is detected first and drives the module description.
-* Business-logic section (workflow states, action buttons) is generated
-  for every model and rendered in the Word/PDF output.
-* System fields, computed fields, and readonly fields are excluded from
-  ALL user-facing sections (field table, menu captions, function steps).
-* Access groups are collected from menus and rendered as «Доступен для:».
-* The Appendix field table is sorted: required fields first, then optional.
-* compact_field_table trims inherited-model noise to max 15 key fields.
-* _build_menus now also applies compact_field_table(max_fields=12) to
-  fields_meta_json so function steps never list more than 12 fields.
+Fix group-3:
+  - _collect_one_module now calls auto_populate_extensions() BEFORE
+    build_functions_from_menus() so inherited_model_ids are populated
+    when functions are generated (fixes missing 'Create event' function).
+  - _build_menus uses get_create_fields() instead of get_user_input_fields()
+    so fields_meta_json only contains fields a user fills on creation:
+    required + editable scalar fields, no one2many / binary / computed.
 """
 import base64
 import logging
@@ -128,16 +118,6 @@ class DocGeneration(models.Model):
             for doc_module in self.doc_module_ids:
                 enricher.enrich_module(doc_module)
 
-        # Auto-populate sections 3, 4, 5, 7 immediately after collection.
-        for doc_module in self.doc_module_ids:
-            try:
-                doc_module.auto_populate_extensions()
-            except Exception:
-                _logger.warning(
-                    "auto_populate_extensions failed for module %s",
-                    doc_module.technical_name, exc_info=True,
-                )
-
         self.state = "awaiting_shots"
         return True
 
@@ -218,6 +198,18 @@ class DocGeneration(models.Model):
         self._build_menus(doc_module, module_name, introspector)
         self._build_models(doc_module, module_name, introspector, parser, parsed, primary_model)
         doc_module.apply_manual_defaults()
+
+        # IMPORTANT: auto_populate_extensions() MUST run before
+        # build_functions_from_menus() so that inherited_model_ids are
+        # already populated when we generate inherited-create functions.
+        try:
+            doc_module.auto_populate_extensions()
+        except Exception:
+            _logger.warning(
+                "auto_populate_extensions failed for module %s",
+                module_name, exc_info=True,
+            )
+
         doc_module.build_functions_from_menus()
         return doc_module
 
@@ -225,25 +217,28 @@ class DocGeneration(models.Model):
         nodes = introspector.get_menu_tree(module_name)
         for node in nodes:
             res_model = node.get("res_model")
-            raw_fields_meta = introspector.get_user_input_fields(res_model) if res_model else {}
 
-            # Apply compact_field_table so that function steps generated from
-            # fields_meta_json never exceed 12 fields. Without this, models
-            # like event.track produced 50+ steps (website/SEO fields included).
+            # Use get_create_fields() — only fields a user fills when
+            # creating a record: required OR editable scalar/relational
+            # fields, NO one2many / binary / computed / readonly.
+            raw_fields_meta = (
+                introspector.get_create_fields(res_model)
+                if res_model else {}
+            )
+
             if raw_fields_meta:
-                field_rows = list(raw_fields_meta.values()) if isinstance(raw_fields_meta, dict) else raw_fields_meta
+                field_rows = list(raw_fields_meta.values())
                 compacted = compact_field_table(
                     field_rows,
                     module_name=module_name,
                     model_names=[res_model] if res_model else None,
-                    max_fields=12,
+                    max_fields=15,
                 )
-                # Rebuild as dict keyed by field name if original was a dict
-                if isinstance(raw_fields_meta, dict):
-                    compacted_names = {r.get("name") for r in compacted}
-                    fields_meta = {k: v for k, v in raw_fields_meta.items() if k in compacted_names}
-                else:
-                    fields_meta = compacted
+                compacted_names = {r.get("name") for r in compacted}
+                fields_meta = {
+                    k: v for k, v in raw_fields_meta.items()
+                    if k in compacted_names
+                }
             else:
                 fields_meta = raw_fields_meta
 
@@ -278,9 +273,6 @@ class DocGeneration(models.Model):
             rows = text_composer.compose_field_table_rows(user_fields_meta, field_comments)
             rows.sort(key=lambda r: (0 if r.get("required") else 1, r.get("label", "")))
 
-            # Trim to the most relevant user-facing fields.
-            # compact_field_table removes remaining noise (website/SEO/portal
-            # fields on inherited Odoo models) and caps the list at max_fields.
             rows = compact_field_table(
                 rows,
                 module_name=module_name,
@@ -399,7 +391,6 @@ class DocGeneration(models.Model):
             lines.append(primary_model_info.business_logic_text.strip())
             lines.append("")
 
-        # Section 3: Lifecycle / Workflow states
         if doc_module.workflow_state_ids:
             lines.append("## 3. Жизненный цикл объекта")
             lines.append("")
@@ -414,7 +405,6 @@ class DocGeneration(models.Model):
                 ))
             lines.append("")
 
-        # Section 4: Inherited models
         if doc_module.inherited_model_ids:
             lines.append("## 4. Расширения базовых моделей")
             lines.append("")
@@ -435,7 +425,6 @@ class DocGeneration(models.Model):
                         ))
                     lines.append("")
 
-        # Section 5: External integrations
         if doc_module.integration_ids:
             lines.append("## 5. Внешние интеграции")
             lines.append("")
@@ -449,7 +438,6 @@ class DocGeneration(models.Model):
                 ))
             lines.append("")
 
-        # Section 6: Functions list
         lines.append("## 6. Список функций")
         lines.append("")
         for func in doc_module.function_ids:
@@ -475,7 +463,6 @@ class DocGeneration(models.Model):
             lines.append("---")
             lines.append("")
 
-        # Section 7: Analytics and exports
         if doc_module.analytic_field_ids or doc_module.export_action_ids:
             lines.append("## 7. Аналитика и экспорт")
             lines.append("")
@@ -504,7 +491,6 @@ class DocGeneration(models.Model):
                     ))
                 lines.append("")
 
-        # Appendix: field tables
         if doc_module.model_ids:
             lines.append("## Приложение. Описание полей")
             lines.append("")

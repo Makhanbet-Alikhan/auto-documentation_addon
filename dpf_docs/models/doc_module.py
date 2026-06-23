@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Stored documentation for one module (the aggregate result)."""
+"""Stored documentation for one module (the aggregate result).
+
+Group-3 fix:
+  build_functions_from_menus() now uses get_create_fields() (via
+  fields_meta_override) for step generation instead of get_user_input_fields(),
+  so steps only list scalar + many2one editable fields.
+  The inherited-create block is unchanged (added in group-2).
+"""
 import base64
 import logging
 import re
@@ -8,13 +15,8 @@ from odoo import _, api, fields, models
 
 _logger = logging.getLogger(__name__)
 
-# Selection field names treated as workflow state carriers.
 _WORKFLOW_STATE_FIELDS = ["state", "dpf_state", "dpf_status", "status"]
-
-# ir.config_parameter key patterns that belong to Odoo core.
 _ODOO_CORE_PARAM_PATTERNS = {"reporting"}
-
-# Pattern to detect action methods: action_<verb>
 _ACTION_METHOD_RE = re.compile(r'^action_\w+$')
 
 
@@ -31,12 +33,7 @@ class DocModule(models.Model):
         string="Module", required=True, help="Technical module name."
     )
     description = fields.Text(string="Module Description")
-
-    primary_model = fields.Char(
-        string="Primary Model",
-        help="Technical name of the main model of this module (auto-detected).",
-    )
-
+    primary_model = fields.Char(string="Primary Model")
     system_name = fields.Char(string="System Name")
     manual_version = fields.Char(string="Manual Version", default="1.0")
     developer = fields.Char(string="Developer")
@@ -57,35 +54,19 @@ class DocModule(models.Model):
     function_ids = fields.One2many("doc.function", "doc_module_id", string="Functions")
 
     workflow_state_ids = fields.One2many(
-        "doc.workflow.state", "doc_module_id",
-        string="3. Lifecycle States",
-        help="States and transitions of the main object (workflow/state machine). "
-             "When filled, Section 3 appears in the generated Word document.",
+        "doc.workflow.state", "doc_module_id", string="3. Lifecycle States",
     )
     inherited_model_ids = fields.One2many(
-        "doc.inherited.model", "doc_module_id",
-        string="4. Inherited Model Extensions",
-        help="Base Odoo models extended via _inherit. Fields added to those models "
-             "are missed by the standard introspector. "
-             "When filled, Section 4 appears in the generated Word document.",
+        "doc.inherited.model", "doc_module_id", string="4. Inherited Model Extensions",
     )
     integration_ids = fields.One2many(
-        "doc.integration", "doc_module_id",
-        string="5. External Integrations",
-        help="External services used by the module (MinIO, RabbitMQ, SMTP, etc.). "
-             "When filled, Section 5 appears in the generated Word document.",
+        "doc.integration", "doc_module_id", string="5. External Integrations",
     )
     analytic_field_ids = fields.One2many(
-        "doc.analytic.field", "doc_module_id",
-        string="7. Analytic Fields",
-        help="Computed KPI fields not visible in the standard field list. "
-             "When filled, Section 7 appears in the generated Word document.",
+        "doc.analytic.field", "doc_module_id", string="7. Analytic Fields",
     )
     export_action_ids = fields.One2many(
-        "doc.export.action", "doc_module_id",
-        string="7. Export Actions",
-        help="PDF/XLSX/CSV export buttons on forms or list views. "
-             "When filled, Section 7 appears in the generated Word document.",
+        "doc.export.action", "doc_module_id", string="7. Export Actions",
     )
 
     menu_count = fields.Integer(string="Menus", compute="_compute_counts", store=True)
@@ -114,41 +95,32 @@ class DocModule(models.Model):
     @staticmethod
     def _table_exists(cr, table_name):
         cr.execute(
-            """
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = %s LIMIT 1
-            """,
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = %s LIMIT 1",
             (table_name,),
         )
         return bool(cr.fetchone())
 
     def _get_own_models(self):
-        """Return set of model technical names that belong to this addon."""
         module_name = self.technical_name
         if not module_name:
             return set()
-
         own = set()
         cr = self.env.cr
-
         for rel_table in ("ir_model_module", "ir_module_module_model_ids_rel"):
             if not self._table_exists(cr, rel_table):
                 continue
             cr.execute(
-                """
-                SELECT im.model
-                FROM ir_model im
-                JOIN {table} rel ON rel.model_id = im.id
-                JOIN ir_module_module mod ON mod.id = rel.module_id
-                WHERE mod.name = %s
-                """.format(table=rel_table),
+                "SELECT im.model FROM ir_model im "
+                "JOIN {table} rel ON rel.model_id = im.id "
+                "JOIN ir_module_module mod ON mod.id = rel.module_id "
+                "WHERE mod.name = %s".format(table=rel_table),
                 (module_name,),
             )
             rows = cr.fetchall()
             if rows:
                 own = {r[0] for r in rows}
                 break
-
         prefixes = set()
         naive = module_name.replace("_", ".") + ".%"
         prefixes.add(naive)
@@ -158,11 +130,9 @@ class DocModule(models.Model):
         parts = module_name.split("_")
         if len(parts) >= 2:
             prefixes.add(".".join(parts) + ".%")
-
         for prefix in prefixes:
             cr.execute("SELECT model FROM ir_model WHERE model LIKE %s", (prefix,))
             own |= {r[0] for r in cr.fetchall()}
-
         exact_candidates = set()
         exact_candidates.add(module_name.replace("_", "."))
         if module_name.endswith("s"):
@@ -170,18 +140,15 @@ class DocModule(models.Model):
         parts = module_name.split("_")
         if len(parts) >= 2:
             exact_candidates.add(".".join(parts))
-
         if exact_candidates:
             cr.execute(
                 "SELECT model FROM ir_model WHERE model IN %s",
                 (tuple(exact_candidates),),
             )
             own |= {r[0] for r in cr.fetchall()}
-
         return {m for m in own if m}
 
     def _get_module_models(self):
-        """Return the set of *own* model names for this addon."""
         self.ensure_one()
         own = self._get_own_models()
         if self.primary_model:
@@ -227,10 +194,8 @@ class DocModule(models.Model):
     def _detect_transitions(self, model_name, state_field_name, selection):
         state_values = [v for v, _ in selection]
         transition_map = {v: [] for v in state_values}
-
         for i, value in enumerate(state_values[:-1]):
             transition_map[value].append(state_values[i + 1])
-
         try:
             import inspect
             model_cls = type(self.env[model_name])
@@ -257,7 +222,6 @@ class DocModule(models.Model):
                     pass
         except Exception:
             pass
-
         return transition_map
 
     def _populate_workflow_states(self):
@@ -265,7 +229,6 @@ class DocModule(models.Model):
         self.workflow_state_ids.unlink()
         model_names = self._get_module_models()
         IrModelFields = self.env["ir.model.fields"]
-
         for model_name in model_names:
             state_field = None
             for candidate in _WORKFLOW_STATE_FIELDS:
@@ -277,10 +240,8 @@ class DocModule(models.Model):
                 if field:
                     state_field = field
                     break
-
             if not state_field:
                 continue
-
             try:
                 selection = self.env[model_name].fields_get(
                     [state_field.name]
@@ -291,10 +252,8 @@ class DocModule(models.Model):
                     model_name, state_field.name, exc_info=True,
                 )
                 continue
-
             btn_map = self._detect_action_buttons(model_name, state_field.name)
             transition_map = self._detect_transitions(model_name, state_field.name, selection)
-
             seq = 10
             for value, label in selection:
                 self.env["doc.workflow.state"].create({
@@ -308,27 +267,17 @@ class DocModule(models.Model):
                 seq += 10
 
     def _get_module_field_models(self):
-        """Return {base_model: [field_records]} for fields added by this addon
-        to models it does NOT own (i.e. _inherit extensions).
-        """
         self.ensure_one()
         module_name = self.technical_name
         if not module_name:
             return {}
-
         own_models = self._get_own_models()
         IrModelFields = self.env["ir.model.fields"]
         cr = self.env.cr
         by_model = {}
-
         cr.execute(
-            """
-            SELECT res_id
-            FROM ir_model_data
-            WHERE module = %s
-              AND model = 'ir.model.fields'
-              AND res_id IS NOT NULL
-            """,
+            "SELECT res_id FROM ir_model_data "
+            "WHERE module = %s AND model = 'ir.model.fields' AND res_id IS NOT NULL",
             (module_name,),
         )
         field_ids = [r[0] for r in cr.fetchall()]
@@ -338,7 +287,6 @@ class DocModule(models.Model):
                 if f.model in own_models:
                     continue
                 by_model.setdefault(f.model, []).append(f)
-
         if not by_model:
             prefix = module_name + "_%"
             own_dot_prefix = module_name.replace("_", ".") + "."
@@ -349,31 +297,24 @@ class DocModule(models.Model):
             for f in candidate_fields:
                 if "." in f.model and not f.model.startswith(own_dot_prefix):
                     by_model.setdefault(f.model, []).append(f)
-
         return by_model
 
-    # System/chatter field names to skip in section 4
     _SECTION4_SKIP_NAMES = frozenset({
         'id', 'display_name', '__last_update',
         'create_uid', 'create_date', 'write_uid', 'write_date',
-        # mail.thread
         'message_is_follower', 'message_follower_ids', 'message_partner_ids',
         'message_ids', 'has_message', 'message_needaction',
         'message_needaction_counter', 'message_has_error',
         'message_has_error_counter', 'message_attachment_count',
         'message_main_attachment_id', 'message_unread_counter',
         'message_bounce', 'message_has_sms_error', 'website_message_ids',
-        # mail.activity.mixin
         'activity_ids', 'activity_state', 'activity_user_id',
         'activity_type_id', 'activity_type_icon', 'activity_date_deadline',
         'my_activity_date_deadline', 'activity_summary',
         'activity_exception_decoration', 'activity_exception_icon',
         'activity_count',
-        # portal / access
         'access_url', 'access_token', 'access_warning',
-        # rating
         'rating_ids', 'rating_last_value', 'rating_avg',
-        # website
         'website_published', 'is_published', 'can_publish',
         'website_url', 'website_id',
         'website_meta_title', 'website_meta_description',
@@ -387,7 +328,6 @@ class DocModule(models.Model):
     )
 
     def _is_section4_skip(self, field_rec):
-        """Return True for system/chatter/website fields to exclude from section 4."""
         name = field_rec.name or ''
         if name in self._SECTION4_SKIP_NAMES:
             return True
@@ -396,18 +336,13 @@ class DocModule(models.Model):
         return False
 
     def _populate_inherited_models(self):
-        """Detect models extended via _inherit for this addon."""
         self.ensure_one()
         self.inherited_model_ids.unlink()
-
         by_model = self._get_module_field_models()
-
         for base_model, field_list in by_model.items():
-            # Filter out system / chatter / website fields
             business_fields = [f for f in field_list if not self._is_section4_skip(f)]
             if not business_fields:
-                continue  # skip model entirely if nothing left
-
+                continue
             inherited = self.env["doc.inherited.model"].create({
                 "doc_module_id": self.id,
                 "base_model": base_model,
@@ -428,20 +363,14 @@ class DocModule(models.Model):
     def _populate_export_actions(self):
         self.ensure_one()
         self.export_action_ids.unlink()
-
         module_name = self.technical_name
         if not module_name:
             return
-
         cr = self.env.cr
         seq = 10
-
         cr.execute(
-            """
-            SELECT res_id FROM ir_model_data
-            WHERE module = %s AND model = 'ir.actions.report'
-              AND res_id IS NOT NULL
-            """,
+            "SELECT res_id FROM ir_model_data "
+            "WHERE module = %s AND model = 'ir.actions.report' AND res_id IS NOT NULL",
             (module_name,),
         )
         report_ids = [r[0] for r in cr.fetchall()]
@@ -456,13 +385,9 @@ class DocModule(models.Model):
                     "description": report.report_name or "",
                 })
                 seq += 10
-
         cr.execute(
-            """
-            SELECT res_id FROM ir_model_data
-            WHERE module = %s AND model = 'ir.actions.server'
-              AND res_id IS NOT NULL
-            """,
+            "SELECT res_id FROM ir_model_data "
+            "WHERE module = %s AND model = 'ir.actions.server' AND res_id IS NOT NULL",
             (module_name,),
         )
         server_ids = [r[0] for r in cr.fetchall()]
@@ -481,33 +406,26 @@ class DocModule(models.Model):
     def _populate_analytic_fields(self):
         self.ensure_one()
         self.analytic_field_ids.unlink()
-
         own_models = self._get_module_models()
         all_model_names = own_models | {
             mi.technical_name for mi in self.model_ids if mi.technical_name
         }
         cr = self.env.cr
         cr.execute(
-            """
-            SELECT DISTINCT im.model
-            FROM ir_model_data imd
-            JOIN ir_model im ON im.id = imd.res_id
-            WHERE imd.module = %s AND imd.model = 'ir.model'
-            """,
+            "SELECT DISTINCT im.model FROM ir_model_data imd "
+            "JOIN ir_model im ON im.id = imd.res_id "
+            "WHERE imd.module = %s AND imd.model = 'ir.model'",
             (self.technical_name,),
         )
         all_model_names |= {r[0] for r in cr.fetchall()}
-
         if not all_model_names:
             return
-
         IrModelFields = self.env["ir.model.fields"]
         fields_qs = IrModelFields.search([
             ("model", "in", list(all_model_names)),
             ("store", "=", False),
             ("compute", "!=", False),
         ])
-
         seq = 10
         for f in fields_qs:
             self.env["doc.analytic.field"].create({
@@ -522,7 +440,6 @@ class DocModule(models.Model):
     def _populate_integrations(self):
         self.ensure_one()
         self.integration_ids.unlink()
-
         ICP = self.env["ir.config_parameter"].sudo()
         hints = [
             ("minio", "MinIO", "S3/HTTP"),
@@ -532,7 +449,6 @@ class DocModule(models.Model):
             ("reporting_service", "Reporting Service", "HTTP"),
             ("auth_service", "Auth Service", "HTTP"),
         ]
-
         seen = set()
         seq = 10
         for pattern, service_name, protocol in hints:
@@ -583,20 +499,19 @@ class DocModule(models.Model):
 
     def build_functions_from_menus(self):
         """
-        Generate Section-6 functions from two sources:
+        Generate Section-6 functions.
 
-        1. doc.menu records belonging to this module (own menus).
-           For each menu with a form view we also generate a
-           "Create <record>" function with per-field steps derived from
-           the menu's fields_meta_json.  When fields_meta_json is empty
-           we fall back to a live ORM lookup so the steps are NEVER a
-           single generic sentence.
+        Source 1 — own menus (doc.menu records):
+          For each menu: «View list» function.
+          For each menu with form: «Create record» function with per-field
+          steps using get_create_fields() (scalar + many2one only).
 
-        2. doc.inherited.model records (populated by auto_populate_extensions).
-           For every inherited base model (e.g. event.event) we generate
-           a dedicated "Create <base record>" function that explains the
-           base-Odoo creation flow AND clarifies that the module only
-           extends that model — it does not own its own creation menu.
+        Source 2 — inherited base models (doc.inherited.model):
+          For every base model extended via _inherit (e.g. event.event)
+          generate a dedicated «Create <model>» function with live ORM
+          field introspection via get_create_fields().
+          NOTE: auto_populate_extensions() MUST be called before this
+          method so inherited_model_ids are already populated.
         """
         self.ensure_one()
         self.function_ids.unlink()
@@ -636,10 +551,10 @@ class DocModule(models.Model):
 
             if self._menu_has_form(menu):
                 number += 1
-                # --- FIXED: always resolve fields from ORM when meta is empty ---
+                # Use get_create_fields for concise steps (scalar + many2one)
                 fields_meta = menu.fields_meta_json or {}
                 if not fields_meta and menu.res_model:
-                    fields_meta = introspector.get_user_input_fields(menu.res_model)
+                    fields_meta = introspector.get_create_fields(menu.res_model)
                 create_entry = composer.function_for_create(
                     menu, number, fields_meta_override=fields_meta
                 )
@@ -653,7 +568,9 @@ class DocModule(models.Model):
                 })
                 self.env["doc.function"].create(create_entry)
 
-        # --- NEW: generate Create functions for every inherited base model ---
+        # --- inherited base models: generate Create function for each ---
+        # inherited_model_ids is populated by auto_populate_extensions()
+        # which is called BEFORE this method in _collect_one_module.
         for inh in self.inherited_model_ids:
             base_model = inh.base_model
             if not base_model:
@@ -742,7 +659,7 @@ class DocModule(models.Model):
             "tag": "display_notification",
             "params": {
                 "title": _("Markdown"),
-                "message": _("\u041c\u0430\u0440\u043a\u0434\u0430\u0443\u043d \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u043d."),
+                "message": _("Маркдаун сгенерирован."),
                 "type": "success",
                 "sticky": False,
             },
@@ -758,8 +675,8 @@ class DocModule(models.Model):
                 "params": {
                     "title": _("Project Snapshot"),
                     "message": _(
-                        "\u0412 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d Snapshot Set. "
-                        "\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044c \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 Project Snapshot Set."
+                        "В генерации не указан Snapshot Set. "
+                        "Откройте запись генерации и выберите Project Snapshot Set."
                     ),
                     "type": "warning",
                     "sticky": True,
@@ -767,11 +684,11 @@ class DocModule(models.Model):
             }
         stats = self.env["doc.project.enricher"].enrich_module(self, overwrite=False)
         if stats["reason"] == "no_matching_tasks":
-            msg = _("\u0417\u0430\u0434\u0430\u0447 \u0441 \u0442\u0435\u0433\u043e\u043c [%s] \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e.") % self.technical_name
+            msg = _("Задач с тегом [%s] не найдено.") % self.technical_name
             notif_type = "warning"
         elif stats["reason"] == "enriched":
             msg = _(
-                "\u041e\u0431\u043e\u0433\u0430\u0449\u0435\u043d\u043e: \u0444\u0443\u043d\u043a\u0446\u0438\u0439 %s, \u043c\u0435\u043d\u044e %s."
+                "Обогащено: функций %s, меню %s."
             ) % (stats["functions_enriched"], stats["menus_enriched"])
             notif_type = "success"
         else:

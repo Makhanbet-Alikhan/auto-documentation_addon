@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 """ORM introspection service — Odoo AbstractModel.
 
-Group-1 fix (generic):
-- Extended _SYSTEM_FIELDS covers all message_* / activity_* / website_message_*
-  prefix-based names so no addon leaks chatter fields into docs.
-- get_user_input_fields now also excludes non-stored computed fields and
-  related-readonly fields (they are rarely useful in user manuals).
-- _ODOO_INTERNAL_FIELDS / _ODOO_INTERNAL_PREFIXES filter website/SEO/portal
-  fields that Odoo injects via _inherit but users never fill in back-office.
-- get_module_model_names(module_name) returns technical names of ALL
-  models registered by a given addon — both top-level own models AND inherited
-  extensions. Used by doc_generation to build a complete model coverage list.
-- get_primary_model() and get_module_models() retained for backward-compat
-  with doc_generation.py callers.
+Group-3 fix:
+- Added get_create_fields(res_model) that returns ONLY fields a user fills
+  when creating a record:
+    * required fields (regardless of type, except system/computed)
+    * editable scalar fields: char, text, html, integer, float, monetary,
+      boolean, date, datetime, selection, many2one
+  Excluded: one2many, many2many, binary, image, json, computed, readonly,
+            system/chatter/website fields.
+  This fixes the 'too many fields' problem in function step lists.
 """
 import logging
 import re
@@ -42,45 +39,42 @@ _SYSTEM_PREFIXES = (
     "message_", "activity_", "website_message_", "__",
 )
 
-# Fields injected by Odoo's website/SEO/portal mixins that are never
-# relevant in a back-office user manual.  These are NOT system fields
-# (they can be readonly=False) but they have no place in function steps
-# or field tables for ordinary business modules.
 _ODOO_INTERNAL_FIELDS: frozenset = frozenset({
-    # --- website.published.mixin / website.seo.metadata ---
     "website_published", "is_published", "can_publish",
     "website_url", "website_id",
     "website_meta_title", "website_meta_description",
     "website_meta_keywords", "website_meta_og_img",
     "seo_name", "website_slug",
     "website_indexed",
-    # --- website views / layout ---
     "footer_visible", "header_visible",
     "website_published", "is_seo_optimized",
-    # --- portal mixin ---
     "access_url", "access_token", "access_warning",
-    # --- mail.thread / mail.activity.mixin (belt-and-suspenders) ---
     "message_bounce", "email_normalized",
-    # --- visible_on_website / website track fields ---
     "website_image", "website_image_url",
-    "tag_ids",  # generic many2many tag, usually a UI widget not a form field
-    # --- always-wishlisted / magic button (event.track specific) ---
+    "tag_ids",
     "always_wishlisted", "magic_button", "show_button",
     "button_title", "button_target_url",
-    # --- speaker / bio (website-facing, not back-office) ---
     "biography", "speaker_photo",
     "job_position", "company_name",
-    # --- kanban color (UI only) ---
     "color", "kanban_state",
-    # --- ir.attachment helpers ---
     "attachment_ids",
 })
 
 _ODOO_INTERNAL_PREFIXES = (
-    "website_",   # website_meta_*, website_slug, website_published, ...
-    "seo_",       # seo_name, seo_optimized, ...
+    "website_",
+    "seo_",
     "is_seo_",
 )
+
+# Field types that are meaningful for a CREATE form
+_CREATE_FIELD_TYPES = frozenset({
+    "char", "text", "html",
+    "integer", "float", "monetary",
+    "boolean",
+    "date", "datetime",
+    "selection",
+    "many2one",
+})
 
 
 def _is_system_field(fname: str, meta: dict) -> bool:
@@ -94,7 +88,6 @@ def _is_system_field(fname: str, meta: dict) -> bool:
 
 
 def _is_odoo_internal_field(fname: str) -> bool:
-    """Return True for website/SEO/portal fields injected by Odoo mixins."""
     if fname in _ODOO_INTERNAL_FIELDS:
         return True
     if any(fname.startswith(p) for p in _ODOO_INTERNAL_PREFIXES):
@@ -107,15 +100,41 @@ def _is_user_input(fname: str, meta: dict) -> bool:
         return False
     if _is_odoo_internal_field(fname):
         return False
-    # non-stored computes are never user-editable
     if meta.get("compute") and not meta.get("store"):
         return False
-    # related readonly fields without required flag are display-only
     if meta.get("related") and meta.get("readonly") and not meta.get("required"):
         return False
     if meta.get("readonly") and not meta.get("required"):
         return False
     return True
+
+
+def _is_create_field(fname: str, meta: dict) -> bool:
+    """Return True for fields a user fills when CREATING a new record.
+
+    Rules:
+      - Must pass _is_user_input() (excludes system, computed, readonly)
+      - Field type must be in _CREATE_FIELD_TYPES (scalar + many2one)
+        OR field must be required (required fields regardless of type,
+        except one2many which is never on a create form)
+      - one2many is always excluded (child records are created separately)
+      - binary / image excluded (file upload, not a typical create step)
+      - json excluded (developer-only field)
+    """
+    if not _is_user_input(fname, meta):
+        return False
+    ftype = meta.get("type", "")
+    # Always exclude these types from create-form fields
+    if ftype in ("one2many", "binary", "image", "json", "reference"):
+        return False
+    # many2many only if required
+    if ftype == "many2many":
+        return bool(meta.get("required"))
+    # scalar and many2one: include if editable
+    if ftype in _CREATE_FIELD_TYPES:
+        return True
+    # unknown types: include only if required
+    return bool(meta.get("required"))
 
 
 class DocIntrospector(models.AbstractModel):
@@ -199,11 +218,29 @@ class DocIntrospector(models.AbstractModel):
 
     @api.model
     def get_user_input_fields(self, res_model):
+        """All user-editable fields (used for Appendix field tables)."""
         all_meta = self.get_fields_meta(res_model)
         return {
             fname: meta
             for fname, meta in all_meta.items()
             if _is_user_input(fname, meta or {})
+        }
+
+    @api.model
+    def get_create_fields(self, res_model):
+        """Only fields a user fills when creating a record.
+
+        Scalar fields (char, text, integer, float, monetary, boolean,
+        date, datetime, selection, many2one) that are editable.
+        Excludes one2many, binary, image, json, computed, readonly.
+        many2many only if required.
+        Used for function step generation so steps stay concise.
+        """
+        all_meta = self.get_fields_meta(res_model)
+        return {
+            fname: meta
+            for fname, meta in all_meta.items()
+            if _is_create_field(fname, meta or {})
         }
 
     @api.model
@@ -222,11 +259,6 @@ class DocIntrospector(models.AbstractModel):
 
     @api.model
     def get_module_model_names(self, module_name):
-        """Return all ir.model technical names registered by this addon.
-
-        Covers BOTH own models (_name) and inherited extensions (_inherit).
-        Models without menus are included — never silently omitted.
-        """
         imd = self.env["ir.model.data"].search([
             ("module", "=", module_name),
             ("model", "=", "ir.model"),
@@ -239,11 +271,6 @@ class DocIntrospector(models.AbstractModel):
 
     @api.model
     def get_module_models(self, module_name):
-        """Return list of dicts {model, name, transient} for all addon models.
-
-        Backward-compatible with doc_generation._build_models() caller.
-        Internally delegates to get_module_model_names() for filtering.
-        """
         model_names = self.get_module_model_names(module_name)
         if not model_names:
             return []
@@ -257,14 +284,6 @@ class DocIntrospector(models.AbstractModel):
 
     @api.model
     def get_primary_model(self, module_name):
-        """Detect the single most important (primary) model of an addon.
-
-        Algorithm:
-          1. Collect all non-transient models of the addon.
-          2. If only one — return it.
-          3. Otherwise pick the model most referenced via Many2one by others
-             in the same addon (highest fan-in). Ties broken alphabetically.
-        """
         models_info = self.get_module_models(module_name)
         if not models_info:
             return None
