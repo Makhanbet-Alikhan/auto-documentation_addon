@@ -2,10 +2,20 @@
 """Stored documentation for one module (the aggregate result)."""
 import base64
 import logging
+import re
 
 from odoo import _, api, fields, models
 
 _logger = logging.getLogger(__name__)
+
+# Selection field names treated as workflow state carriers.
+_WORKFLOW_STATE_FIELDS = ["state", "dpf_state", "dpf_status", "status"]
+
+# ir.config_parameter key patterns that belong to Odoo core.
+_ODOO_CORE_PARAM_PATTERNS = {"reporting"}
+
+# Pattern to detect action methods: action_<verb>
+_ACTION_METHOD_RE = re.compile(r'^action_\w+$')
 
 
 class DocModule(models.Model):
@@ -22,13 +32,11 @@ class DocModule(models.Model):
     )
     description = fields.Text(string="Module Description")
 
-    # Primary model detected by introspector (most FK-referenced model)
     primary_model = fields.Char(
         string="Primary Model",
         help="Technical name of the main model of this module (auto-detected).",
     )
 
-    # --- User-manual metadata ---
     system_name = fields.Char(string="System Name")
     manual_version = fields.Char(string="Manual Version", default="1.0")
     developer = fields.Char(string="Developer")
@@ -48,11 +56,6 @@ class DocModule(models.Model):
     model_ids = fields.One2many("doc.model.info", "doc_module_id", string="Models")
     function_ids = fields.One2many("doc.function", "doc_module_id", string="Functions")
 
-    # ------------------------------------------------------------------
-    # Extended documentation sections (populated manually or via future
-    # automated introspectors).  All are optional — the Word exporter
-    # skips a section entirely when the corresponding relation is empty.
-    # ------------------------------------------------------------------
     workflow_state_ids = fields.One2many(
         "doc.workflow.state", "doc_module_id",
         string="3. Lifecycle States",
@@ -103,6 +106,436 @@ class DocModule(models.Model):
             rec.captured_count = len(
                 rec.menu_ids.filtered(lambda m: m.capture_state == "captured")
             )
+
+    # ------------------------------------------------------------------
+    # Auto-population of extension sections (3, 4, 5, 7)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _table_exists(cr, table_name):
+        cr.execute(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = %s LIMIT 1
+            """,
+            (table_name,),
+        )
+        return bool(cr.fetchone())
+
+    def _get_own_models(self):
+        """Return set of model technical names that belong to this addon.
+
+        Uses three complementary strategies:
+        1. ir_model_module relation table (most precise).
+        2. LIKE prefix scan — tries both the naive replace and the singular
+           variant to handle plurality (dpf_events -> dpf.event.*).
+        3. Exact match scan — catches root models like dpf.event that are
+           NOT matched by the 'dpf.event.%' LIKE pattern.
+        """
+        module_name = self.technical_name
+        if not module_name:
+            return set()
+
+        own = set()
+        cr = self.env.cr
+
+        # Strategy 1: relation table
+        for rel_table in ("ir_model_module", "ir_module_module_model_ids_rel"):
+            if not self._table_exists(cr, rel_table):
+                continue
+            cr.execute(
+                """
+                SELECT im.model
+                FROM ir_model im
+                JOIN {table} rel ON rel.model_id = im.id
+                JOIN ir_module_module mod ON mod.id = rel.module_id
+                WHERE mod.name = %s
+                """.format(table=rel_table),
+                (module_name,),
+            )
+            rows = cr.fetchall()
+            if rows:
+                own = {r[0] for r in rows}
+                break
+
+        # Strategy 2: LIKE prefix variants
+        prefixes = set()
+        naive = module_name.replace("_", ".") + ".%"
+        prefixes.add(naive)
+        if module_name.endswith("s"):
+            singular = module_name[:-1].replace("_", ".") + ".%"
+            prefixes.add(singular)
+        parts = module_name.split("_")
+        if len(parts) >= 2:
+            prefixes.add(".".join(parts) + ".%")
+
+        for prefix in prefixes:
+            cr.execute("SELECT model FROM ir_model WHERE model LIKE %s", (prefix,))
+            own |= {r[0] for r in cr.fetchall()}
+
+        # Strategy 3: exact root model match (e.g. dpf.event from dpf_events)
+        exact_candidates = set()
+        exact_candidates.add(module_name.replace("_", "."))
+        if module_name.endswith("s"):
+            exact_candidates.add(module_name[:-1].replace("_", "."))
+        parts = module_name.split("_")
+        if len(parts) >= 2:
+            exact_candidates.add(".".join(parts))
+
+        if exact_candidates:
+            cr.execute(
+                "SELECT model FROM ir_model WHERE model IN %s",
+                (tuple(exact_candidates),),
+            )
+            own |= {r[0] for r in cr.fetchall()}
+
+        return {m for m in own if m}
+
+    def _get_module_models(self):
+        """Return the set of *own* model names for this addon."""
+        self.ensure_one()
+        own = self._get_own_models()
+        if self.primary_model:
+            own.add(self.primary_model)
+        prefix = self.technical_name.replace("_", ".") + "."
+        for mi in self.model_ids:
+            if mi.technical_name and mi.technical_name.startswith(prefix):
+                own.add(mi.technical_name)
+        return {m for m in own if m}
+
+    def _detect_action_buttons(self, model_name, state_field_name):
+        """Return dict {target_state: button_label} by inspecting action_* methods."""
+        btn_map = {}
+        try:
+            import inspect
+            model_cls = type(self.env[model_name])
+            for attr_name in dir(model_cls):
+                if not _ACTION_METHOD_RE.match(attr_name):
+                    continue
+                method = getattr(model_cls, attr_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    src = inspect.getsource(method)
+                    pattern = re.compile(
+                        r'["\']' + re.escape(state_field_name) + r'["\']\s*:\s*["\']([\w]+)["\']'
+                    )
+                    for match in pattern.finditer(src):
+                        target_state = match.group(1)
+                        human = (
+                            attr_name
+                            .replace("action_", "")
+                            .replace("dpf_", "")
+                            .replace("_", " ")
+                            .title()
+                        )
+                        btn_map[target_state] = human
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return btn_map
+
+    def _detect_transitions(self, model_name, state_field_name, selection):
+        """Build a best-effort transition map {from_state: [to_states]}."""
+        state_values = [v for v, _ in selection]
+        transition_map = {v: [] for v in state_values}
+
+        # Forward transitions from selection order
+        for i, value in enumerate(state_values[:-1]):
+            transition_map[value].append(state_values[i + 1])
+
+        # Augment with transitions detected from action_* method sources
+        try:
+            import inspect
+            model_cls = type(self.env[model_name])
+            for attr_name in dir(model_cls):
+                if not _ACTION_METHOD_RE.match(attr_name):
+                    continue
+                method = getattr(model_cls, attr_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    src = inspect.getsource(method)
+                    pattern = re.compile(
+                        r'["\']' + re.escape(state_field_name) + r'["\']\s*:\s*["\']([\w]+)["\']'
+                    )
+                    written_states = [m.group(1) for m in pattern.finditer(src)]
+                    if not written_states:
+                        continue
+                    target = written_states[0]
+                    for from_state in state_values:
+                        if from_state != target and target not in transition_map[from_state]:
+                            if any(kw in attr_name for kw in ("cancel", "reset", "abort")):
+                                transition_map[from_state].append(target)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return transition_map
+
+    def _populate_workflow_states(self):
+        """Detect selection-based workflows for the module's own models."""
+        self.ensure_one()
+        self.workflow_state_ids.unlink()
+        model_names = self._get_module_models()
+        IrModelFields = self.env["ir.model.fields"]
+
+        for model_name in model_names:
+            state_field = None
+            for candidate in _WORKFLOW_STATE_FIELDS:
+                field = IrModelFields.search([
+                    ("model", "=", model_name),
+                    ("name", "=", candidate),
+                    ("ttype", "=", "selection"),
+                ], limit=1)
+                if field:
+                    state_field = field
+                    break
+
+            if not state_field:
+                continue
+
+            try:
+                selection = self.env[model_name].fields_get(
+                    [state_field.name]
+                )[state_field.name]["selection"]
+            except Exception:
+                _logger.warning(
+                    "Failed to introspect state selection for model %s (field %s)",
+                    model_name, state_field.name, exc_info=True,
+                )
+                continue
+
+            btn_map = self._detect_action_buttons(model_name, state_field.name)
+            transition_map = self._detect_transitions(model_name, state_field.name, selection)
+
+            seq = 10
+            for value, label in selection:
+                self.env["doc.workflow.state"].create({
+                    "doc_module_id": self.id,
+                    "sequence": seq,
+                    "name": value,
+                    "label": label,
+                    "transitions": ", ".join(transition_map.get(value, [])) or False,
+                    "button_label": btn_map.get(value, "") or False,
+                })
+                seq += 10
+
+    def _get_module_field_models(self):
+        """Return {base_model: [field_records]} for fields added by this addon
+        to models it does NOT own (i.e. _inherit extensions).
+        """
+        self.ensure_one()
+        module_name = self.technical_name
+        if not module_name:
+            return {}
+
+        own_models = self._get_own_models()
+        IrModelFields = self.env["ir.model.fields"]
+        cr = self.env.cr
+        by_model = {}
+
+        # Strategy 1: ir_model_data lookup
+        cr.execute(
+            """
+            SELECT res_id
+            FROM ir_model_data
+            WHERE module = %s
+              AND model = 'ir.model.fields'
+              AND res_id IS NOT NULL
+            """,
+            (module_name,),
+        )
+        field_ids = [r[0] for r in cr.fetchall()]
+        if field_ids:
+            fields_qs = IrModelFields.browse(field_ids).exists()
+            for f in fields_qs:
+                if f.model in own_models:
+                    continue
+                by_model.setdefault(f.model, []).append(f)
+
+        # Strategy 2: name-prefix fallback
+        if not by_model:
+            prefix = module_name + "_%"
+            own_dot_prefix = module_name.replace("_", ".") + "."
+            candidate_fields = IrModelFields.search([
+                ("name", "=like", prefix),
+                ("model", "not in", list(own_models)),
+            ])
+            for f in candidate_fields:
+                if "." in f.model and not f.model.startswith(own_dot_prefix):
+                    by_model.setdefault(f.model, []).append(f)
+
+        return by_model
+
+    def _populate_inherited_models(self):
+        """Detect models extended via _inherit for this addon."""
+        self.ensure_one()
+        self.inherited_model_ids.unlink()
+
+        by_model = self._get_module_field_models()
+
+        for base_model, field_list in by_model.items():
+            inherited = self.env["doc.inherited.model"].create({
+                "doc_module_id": self.id,
+                "base_model": base_model,
+            })
+            seq = 10
+            for f in field_list:
+                self.env["doc.inherited.field"].create({
+                    "inherited_model_id": inherited.id,
+                    "sequence": seq,
+                    "field_name": f.name,
+                    "field_type": f.ttype,
+                    "description": f.field_description or False,
+                    "is_required": f.required,
+                    "is_computed": bool(f.compute),
+                })
+                seq += 10
+
+    def _populate_export_actions(self):
+        """Detect report/export actions registered by this addon."""
+        self.ensure_one()
+        self.export_action_ids.unlink()
+
+        module_name = self.technical_name
+        if not module_name:
+            return
+
+        cr = self.env.cr
+        seq = 10
+
+        cr.execute(
+            """
+            SELECT res_id FROM ir_model_data
+            WHERE module = %s AND model = 'ir.actions.report'
+              AND res_id IS NOT NULL
+            """,
+            (module_name,),
+        )
+        report_ids = [r[0] for r in cr.fetchall()]
+        if report_ids:
+            reports = self.env["ir.actions.report"].browse(report_ids).exists()
+            for report in reports:
+                self.env["doc.export.action"].create({
+                    "doc_module_id": self.id,
+                    "sequence": seq,
+                    "name": report.name,
+                    "format": (report.report_type or "").upper(),
+                    "description": report.report_name or "",
+                })
+                seq += 10
+
+        cr.execute(
+            """
+            SELECT res_id FROM ir_model_data
+            WHERE module = %s AND model = 'ir.actions.server'
+              AND res_id IS NOT NULL
+            """,
+            (module_name,),
+        )
+        server_ids = [r[0] for r in cr.fetchall()]
+        if server_ids:
+            servers = self.env["ir.actions.server"].browse(server_ids).exists()
+            for action in servers:
+                self.env["doc.export.action"].create({
+                    "doc_module_id": self.id,
+                    "sequence": seq,
+                    "name": action.name,
+                    "format": "SERVER",
+                    "description": action.state or "",
+                })
+                seq += 10
+
+    def _populate_analytic_fields(self):
+        """Detect computed, non-stored fields as analytic/KPI fields."""
+        self.ensure_one()
+        self.analytic_field_ids.unlink()
+
+        own_models = self._get_module_models()
+        all_model_names = own_models | {
+            mi.technical_name for mi in self.model_ids if mi.technical_name
+        }
+        cr = self.env.cr
+        cr.execute(
+            """
+            SELECT DISTINCT im.model
+            FROM ir_model_data imd
+            JOIN ir_model im ON im.id = imd.res_id
+            WHERE imd.module = %s AND imd.model = 'ir.model'
+            """,
+            (self.technical_name,),
+        )
+        all_model_names |= {r[0] for r in cr.fetchall()}
+
+        if not all_model_names:
+            return
+
+        IrModelFields = self.env["ir.model.fields"]
+        fields_qs = IrModelFields.search([
+            ("model", "in", list(all_model_names)),
+            ("store", "=", False),
+            ("compute", "!=", False),
+        ])
+
+        seq = 10
+        for f in fields_qs:
+            self.env["doc.analytic.field"].create({
+                "doc_module_id": self.id,
+                "sequence": seq,
+                "name": f.field_description or f.name,
+                "description": "Computed field on %s" % f.model,
+                "formula_hint": "compute=%s" % (f.compute or ""),
+            })
+            seq += 10
+
+    def _populate_integrations(self):
+        """Best-effort detection of external integrations via ir.config_parameter."""
+        self.ensure_one()
+        self.integration_ids.unlink()
+
+        ICP = self.env["ir.config_parameter"].sudo()
+        hints = [
+            ("minio", "MinIO", "S3/HTTP"),
+            ("amqp", "RabbitMQ", "AMQP"),
+            ("rabbitmq", "RabbitMQ", "AMQP"),
+            ("email_notification_service", "Email Notification Service", "HTTP/AMQP"),
+            ("reporting_service", "Reporting Service", "HTTP"),
+            ("auth_service", "Auth Service", "HTTP"),
+        ]
+
+        seen = set()
+        seq = 10
+        for pattern, service_name, protocol in hints:
+            if pattern in _ODOO_CORE_PARAM_PATTERNS:
+                continue
+            params = ICP.search([("key", "ilike", pattern)])
+            if not params or service_name in seen:
+                continue
+            seen.add(service_name)
+            self.env["doc.integration"].create({
+                "doc_module_id": self.id,
+                "sequence": seq,
+                "name": service_name,
+                "protocol": protocol,
+                "purpose": "Auto-detected via configuration parameter containing '%s'." % pattern,
+            })
+            seq += 10
+
+    def auto_populate_extensions(self):
+        """Populate sections 3-5 and 7 automatically from ORM introspection.
+
+        Called automatically during action_collect() and action_download_word().
+        No manual trigger needed.
+        """
+        self.ensure_one()
+        self._populate_workflow_states()
+        self._populate_inherited_models()
+        self._populate_export_actions()
+        self._populate_analytic_fields()
+        self._populate_integrations()
 
     # ------------------------------------------------------------------
     # Manual content helpers
@@ -223,7 +656,7 @@ class DocModule(models.Model):
         self.ensure_one()
         try:
             md = self.env["doc.generation"]._render_markdown(self)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.error(
                 "action_render_markdown: error for module %s: %s",
                 self.technical_name, exc, exc_info=True,
@@ -307,7 +740,7 @@ class DocModule(models.Model):
             return
         try:
             capturer.capture_module(self, only_missing=True)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _logger.warning(
                 "Auto-capture failed for module %s.",
                 self.technical_name, exc_info=True,
@@ -315,6 +748,13 @@ class DocModule(models.Model):
 
     def _build_word_attachment(self):
         self.ensure_one()
+        try:
+            self.auto_populate_extensions()
+        except Exception:
+            _logger.warning(
+                "auto_populate_extensions failed for module %s",
+                self.technical_name, exc_info=True,
+            )
         self._auto_capture_if_enabled()
         self.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self)

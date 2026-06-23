@@ -124,6 +124,16 @@ class DocGeneration(models.Model):
             for doc_module in self.doc_module_ids:
                 enricher.enrich_module(doc_module)
 
+        # Auto-populate sections 3, 4, 5, 7 immediately after collection.
+        for doc_module in self.doc_module_ids:
+            try:
+                doc_module.auto_populate_extensions()
+            except Exception:
+                _logger.warning(
+                    "auto_populate_extensions failed for module %s",
+                    doc_module.technical_name, exc_info=True,
+                )
+
         self.state = "awaiting_shots"
         return True
 
@@ -353,7 +363,58 @@ class DocGeneration(models.Model):
             lines.append(primary_model_info.business_logic_text.strip())
             lines.append("")
 
-        lines.append("## 3. Список функций")
+        # Section 3: Lifecycle / Workflow states
+        if doc_module.workflow_state_ids:
+            lines.append("## 3. Жизненный цикл объекта")
+            lines.append("")
+            lines.append("| Состояние | Метка | Переходы | Кнопка |")
+            lines.append("|-----------|-------|----------|--------|")
+            for state in doc_module.workflow_state_ids:
+                lines.append("| %s | %s | %s | %s |" % (
+                    state.name or "",
+                    state.label or "",
+                    state.transitions or "",
+                    state.button_label or "",
+                ))
+            lines.append("")
+
+        # Section 4: Inherited models
+        if doc_module.inherited_model_ids:
+            lines.append("## 4. Расширения базовых моделей")
+            lines.append("")
+            for inh in doc_module.inherited_model_ids:
+                lines.append("### %s" % (inh.base_model or ""))
+                if inh.description:
+                    lines.append(inh.description.strip())
+                    lines.append("")
+                if inh.field_ids:
+                    lines.append("| Поле | Тип | Обязательное | Описание |")
+                    lines.append("|------|-----|:---:|---------|")
+                    for fld in inh.field_ids:
+                        lines.append("| `%s` | %s | %s | %s |" % (
+                            fld.field_name or "",
+                            fld.field_type or "",
+                            "Да" if fld.is_required else "Нет",
+                            fld.description or "",
+                        ))
+                    lines.append("")
+
+        # Section 5: External integrations
+        if doc_module.integration_ids:
+            lines.append("## 5. Внешние интеграции")
+            lines.append("")
+            lines.append("| Сервис | Протокол | Назначение |")
+            lines.append("|--------|----------|------------|")
+            for itg in doc_module.integration_ids:
+                lines.append("| %s | %s | %s |" % (
+                    itg.name or "",
+                    itg.protocol or "",
+                    itg.purpose or "",
+                ))
+            lines.append("")
+
+        # Section 6: Functions list
+        lines.append("## 6. Список функций")
         lines.append("")
         for func in doc_module.function_ids:
             lines.append("### Функция %d: %s" % (func.number or 0, func.name or ""))
@@ -378,6 +439,36 @@ class DocGeneration(models.Model):
             lines.append("---")
             lines.append("")
 
+        # Section 7: Analytics and exports
+        if doc_module.analytic_field_ids or doc_module.export_action_ids:
+            lines.append("## 7. Аналитика и экспорт")
+            lines.append("")
+            if doc_module.analytic_field_ids:
+                lines.append("### 7.1 Аналитические показатели")
+                lines.append("")
+                lines.append("| Показатель | Описание | Формула |")
+                lines.append("|------------|---------|---------|")
+                for af in doc_module.analytic_field_ids:
+                    lines.append("| %s | %s | %s |" % (
+                        af.name or "",
+                        af.description or "",
+                        af.formula_hint or "",
+                    ))
+                lines.append("")
+            if doc_module.export_action_ids:
+                lines.append("### 7.2 Экспортные действия")
+                lines.append("")
+                lines.append("| Название | Формат | Описание |")
+                lines.append("|---------|--------|---------|")
+                for ea in doc_module.export_action_ids:
+                    lines.append("| %s | %s | %s |" % (
+                        ea.name or "",
+                        ea.format or "",
+                        ea.description or "",
+                    ))
+                lines.append("")
+
+        # Appendix: field tables
         if doc_module.model_ids:
             lines.append("## Приложение. Описание полей")
             lines.append("")
@@ -410,14 +501,14 @@ class DocGeneration(models.Model):
                 lines.append("")
 
         if doc_module.bibliography:
-            lines.append("## 4. Литература")
+            lines.append("## 8. Литература")
             for line in doc_module.bibliography.splitlines():
                 if line.strip():
                     lines.append("- %s" % line.strip())
             lines.append("")
 
         if doc_module.glossary:
-            lines.append("## 5. Словарь терминов")
+            lines.append("## 9. Словарь терминов")
             for line in doc_module.glossary.splitlines():
                 if line.strip():
                     lines.append("- %s" % line.strip())
@@ -460,6 +551,13 @@ class DocGeneration(models.Model):
         if not self.doc_module_ids:
             raise UserError(_("Нечего экспортировать. Сначала выполните сбор текстов."))
         for doc_module in self.doc_module_ids:
+            try:
+                doc_module.auto_populate_extensions()
+            except Exception:
+                _logger.warning(
+                    "auto_populate_extensions failed for module %s",
+                    doc_module.technical_name, exc_info=True,
+                )
             doc_module.refresh_function_screenshots()
         data = self.env["doc.word.export"].build_docx(self.doc_module_ids)
         filename = "%s.docx" % (self.name or "documentation").replace(" ", "_")
