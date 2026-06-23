@@ -582,9 +582,26 @@ class DocModule(models.Model):
         return "form" in view_modes
 
     def build_functions_from_menus(self):
+        """
+        Generate Section-6 functions from two sources:
+
+        1. doc.menu records belonging to this module (own menus).
+           For each menu with a form view we also generate a
+           "Create <record>" function with per-field steps derived from
+           the menu's fields_meta_json.  When fields_meta_json is empty
+           we fall back to a live ORM lookup so the steps are NEVER a
+           single generic sentence.
+
+        2. doc.inherited.model records (populated by auto_populate_extensions).
+           For every inherited base model (e.g. event.event) we generate
+           a dedicated "Create <base record>" function that explains the
+           base-Odoo creation flow AND clarifies that the module only
+           extends that model — it does not own its own creation menu.
+        """
         self.ensure_one()
         self.function_ids.unlink()
         composer = self.env["doc.text.defaults"]
+        introspector = self.env["doc.introspector"]
         number = 0
         menus = self.menu_ids.sorted(
             key=lambda m: ((m.sequence or 999999), (m.complete_name or ""), m.id)
@@ -619,7 +636,13 @@ class DocModule(models.Model):
 
             if self._menu_has_form(menu):
                 number += 1
-                create_entry = composer.function_for_create(menu, number)
+                # --- FIXED: always resolve fields from ORM when meta is empty ---
+                fields_meta = menu.fields_meta_json or {}
+                if not fields_meta and menu.res_model:
+                    fields_meta = introspector.get_user_input_fields(menu.res_model)
+                create_entry = composer.function_for_create(
+                    menu, number, fields_meta_override=fields_meta
+                )
                 create_entry.update({
                     "doc_module_id": self.id,
                     "doc_menu_id": menu.id,
@@ -629,6 +652,26 @@ class DocModule(models.Model):
                     "screenshot_source": "menu" if menu.screenshot else "none",
                 })
                 self.env["doc.function"].create(create_entry)
+
+        # --- NEW: generate Create functions for every inherited base model ---
+        for inh in self.inherited_model_ids:
+            base_model = inh.base_model
+            if not base_model:
+                continue
+            number += 1
+            inh_entry = composer.function_for_inherited_create(
+                base_model=base_model,
+                module_name=self.name or self.technical_name,
+                number=number,
+                introspector=introspector,
+            )
+            inh_entry.update({
+                "doc_module_id": self.id,
+                "sequence": number * 10,
+                "number": number,
+            })
+            self.env["doc.function"].create(inh_entry)
+
         return True
 
     def capture_screenshots(self, only_missing=True):
