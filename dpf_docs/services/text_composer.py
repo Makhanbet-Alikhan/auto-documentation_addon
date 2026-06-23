@@ -14,8 +14,20 @@ Key design decisions
 * Business-logic (workflow states, action buttons, constraints) gets its own
   dedicated section so users understand what the system does automatically.
 * The primary model drives the module description.
+
+v3 fixes applied
+----------------
+* PROBLEM 1: compose_inheritance_section() — architecture overview section.
+* PROBLEM 4: compose_business_logic_section() uses ValidationError messages
+  from ast_extractor instead of raw method names for constraints.
+* PROBLEM 5: sanitize_task_text() strips internal TZ/TS blocks from tasks;
+  compose_related_tasks_section() places tasks in a dedicated section.
+* PROBLEM 6: compose_inherited_model_section() generates a single compact
+  section for _inherit models listing only addon-contributed fields.
+* PROBLEM 7: compose_module_description() falls back to model._description.
 """
 import logging
+import re
 
 from .model_doc_utils import is_user_visible_candidate
 
@@ -41,9 +53,208 @@ _TYPE_LABELS: dict = {
     "json":      "данные",
 }
 
+# ---------------------------------------------------------------------------
+# PROBLEM 5 — Task text sanitization
+# ---------------------------------------------------------------------------
 
-def compose_module_description(manifest, main_model_doc):
-    """Составить описание модуля верхнего уровня для конечных пользователей."""
+# Patterns that mark internal TZ/TS content blocks to strip
+_INTERNAL_BLOCK_PATTERNS = [
+    re.compile(
+        r"(ЧТО СДЕЛАТЬ|ОПИСАНИЕ\s*\(из\s*ТС\)|ЧТО\s+СДЕЛАТЬ)[:\s]*.*?(?=\n\n|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    re.compile(r"Оценка:\s*\d+[^\n]*\n?", re.IGNORECASE),
+    re.compile(r"API:[^\n]*\n?", re.IGNORECASE),
+    re.compile(r"[-–—]{3,}\s*\n"),  # horizontal rule separators
+]
+
+# Tags that mark a task as internal — do not include in user docs
+_INTERNAL_TAGS = frozenset({
+    "internal", "technical", "tech", "tz", "тз", "тс",
+    "internal-only", "dev-only",
+})
+
+
+def sanitize_task_text(text):
+    """Remove internal TZ/TS blocks from a project task body.
+
+    Strips patterns like 'ЧТО СДЕЛАТЬ:', 'ОПИСАНИЕ (из ТС)',
+    'Оценка: X нед.', 'API:' that are intended for developers only.
+
+    PROBLEM 5 fix.
+    """
+    if not text:
+        return ""
+    result = text
+    for pattern in _INTERNAL_BLOCK_PATTERNS:
+        result = pattern.sub("", result)
+    # Collapse multiple blank lines into one
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+def is_internal_task(task_tags):
+    """Return True if the task carries any internal/technical tag.
+
+    ``task_tags`` should be a list/set of tag name strings (lowercase).
+
+    PROBLEM 5 fix.
+    """
+    if not task_tags:
+        return False
+    return bool(_INTERNAL_TAGS & {t.lower().strip() for t in task_tags})
+
+
+def compose_related_tasks_section(tasks):
+    """Compose a dedicated 'Связанные задачи' section from project tasks.
+
+    Each task dict should have keys: ``name``, ``description``, ``tags``.
+    Tasks tagged as internal are excluded entirely.
+    Task bodies are sanitized before inclusion.
+
+    PROBLEM 5 fix: tasks go into their own section, never inside function
+    bodies.
+    """
+    if not tasks:
+        return ""
+
+    lines = ["Связанные задачи", "="* 40, ""]
+    included = 0
+    for task in tasks:
+        tags = task.get("tags") or []
+        if is_internal_task(tags):
+            continue
+        name = (task.get("name") or "").strip()
+        description = sanitize_task_text(task.get("description") or "")
+        if not name:
+            continue
+        lines.append("• %s" % name)
+        if description:
+            for line in description.splitlines()[:5]:  # first 5 lines
+                lines.append("  %s" % line)
+        lines.append("")
+        included += 1
+
+    if not included:
+        return ""
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# PROBLEM 1 — Architecture / inheritance section
+# ---------------------------------------------------------------------------
+
+def compose_inheritance_section(models_info):
+    """Compose the 'Архитектура модуля' section.
+
+    ``models_info`` is the list returned by
+    ``DocIntrospector.get_module_models()`` — each entry has keys
+    ``model``, ``name``, ``inherited`` (bool), ``transient`` (bool).
+
+    The section is split into two subsections:
+    * 'Собственные модели'   — entries with ``inherited=False``
+    * 'Расширяемые модели Odoo' — entries with ``inherited=True``
+
+    PROBLEM 1 fix.
+    """
+    if not models_info:
+        return ""
+
+    own = [m for m in models_info if not m.get("inherited")]
+    inherited = [m for m in models_info if m.get("inherited")]
+
+    lines = ["Архитектура модуля", "=" * 40, ""]
+
+    if own:
+        lines.append("Собственные модели")
+        lines.append("-" * 30)
+        lines.append(
+            "Следующие модели объявлены непосредственно в данном модуле "
+            "(атрибут _name):"
+        )
+        for m in own:
+            transient_mark = " (временная модель)" if m.get("transient") else ""
+            lines.append(
+                "  • %s — %s%s" % (m["model"], m.get("name") or m["model"], transient_mark)
+            )
+        lines.append("")
+
+    if inherited:
+        lines.append("Расширяемые модели Odoo")
+        lines.append("-" * 30)
+        lines.append(
+            "Следующие стандартные модели Odoo расширяются данным модулем "
+            "(атрибут _inherit) — к ним добавляются новые поля и/или поведение:"
+        )
+        for m in inherited:
+            lines.append(
+                "  • %s — %s" % (m["model"], m.get("name") or m["model"])
+            )
+        lines.append("")
+
+    if not own and not inherited:
+        return ""
+
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# PROBLEM 6 — Inherited model single-function section
+# ---------------------------------------------------------------------------
+
+def compose_inherited_model_section(model_name, model_display_name, addon_fields_meta):
+    """Compose a compact section for an _inherit model.
+
+    Instead of generating full 'Просмотр' + 'Создание' duplicate functions,
+    we emit a single section: 'Работа с записью «ModelName»' that lists only
+    the fields contributed by the addon (not all base model fields).
+
+    ``addon_fields_meta`` is the dict returned by
+    ``DocIntrospector.get_addon_own_fields()``.
+
+    PROBLEM 6 fix.
+    """
+    display = model_display_name or model_name
+    lines = [
+        "Работа с записью «%s»" % display,
+        "-" * 40,
+        "Модуль добавляет следующие дополнительные поля к стандартной форме Odoo:",
+        "",
+    ]
+
+    if not addon_fields_meta:
+        lines.append("(Модуль не добавляет собственных полей к данной модели.)")
+    else:
+        for fname, meta in sorted((addon_fields_meta or {}).items()):
+            meta = meta or {}
+            label = meta.get("string") or fname
+            ftype = meta.get("type") or ""
+            type_label = _TYPE_LABELS.get(ftype, ftype)
+            required_mark = " *" if meta.get("required") else ""
+            help_text = (meta.get("help") or "").strip()
+            help_part = " — %s" % help_text if help_text else ""
+            lines.append(
+                "  • %s%s (%s)%s" % (label, required_mark, type_label, help_part)
+            )
+
+    lines.append("")
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# Core composers (existing, with targeted fixes)
+# ---------------------------------------------------------------------------
+
+def compose_module_description(manifest, main_model_doc, models_info=None, env=None):
+    """Составить описание модуля верхнего уровня для конечных пользователей.
+
+    PROBLEM 7 fix: when summary/description are absent or too short, a
+    fallback paragraph is built from the module's own model ``_description``
+    attributes so the section is never empty.
+
+    ``models_info`` — list from DocIntrospector.get_module_models().
+    ``env``         — Odoo environment (needed to read _description).
+    """
     parts = []
     summary = (manifest or {}).get("summary", "").strip()
     if summary:
@@ -55,6 +266,32 @@ def compose_module_description(manifest, main_model_doc):
         doc = main_model_doc.strip()
         if doc and doc not in parts:
             parts.append(doc)
+
+    # PROBLEM 7 fallback: generate from own model _descriptions
+    if not parts and models_info and env is not None:
+        own_models = [m for m in models_info if not m.get("inherited")]
+        generated_lines = []
+        for minfo in own_models:
+            model_key = minfo["model"]
+            if model_key not in env:
+                continue
+            model_obj = env[model_key]
+            model_description = getattr(model_obj, "_description", None) or ""
+            model_name_label = minfo.get("name") or model_key
+            if model_description and model_description != model_key:
+                generated_lines.append(
+                    "• %s (%s): %s" % (model_name_label, model_key, model_description)
+                )
+            else:
+                generated_lines.append(
+                    "• %s (%s)" % (model_name_label, model_key)
+                )
+        if generated_lines:
+            parts.append(
+                "Модуль предоставляет следующие объекты системы:\n"
+                + "\n".join(generated_lines)
+            )
+
     if not parts:
         return "Описание модуля недоступно."
     return "\n\n".join(parts)
@@ -75,11 +312,7 @@ def compose_model_description(model_name, class_doc, field_comments):
 
 
 def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=None):
-    """Описать экран для пользователя.
-
-    Only includes USER-INPUT fields in the key-fields summary.
-    Uses is_user_visible_candidate from model_doc_utils as single source of truth.
-    """
+    """Описать экран для пользователя."""
     view_labels = {
         "list":     "список",
         "form":     "форма",
@@ -99,7 +332,6 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=N
     input_labels = []
     for fname, meta in (fields_meta or {}).items():
         meta = meta or {}
-        # Use the same filter as field tables — single source of truth
         field_info = dict(meta)
         field_info["name"] = fname
         if not is_user_visible_candidate(field_info):
@@ -124,17 +356,11 @@ def compose_menu_caption(menu_name, res_model, view_modes, fields_meta, groups=N
 
 
 def compose_field_table_rows(fields_meta, field_comments=None):
-    """Вернуть строки для таблицы редактируемых полей.
-
-    USER-INPUT ONLY: uses is_user_visible_candidate from model_doc_utils
-    as the single source of truth for field filtering.
-    Rows are returned unsorted; caller should sort required-first.
-    """
+    """Вернуть строки для таблицы редактируемых полей."""
     field_comments = field_comments or {}
     rows = []
     for fname, meta in sorted((fields_meta or {}).items()):
         meta = meta or {}
-        # Build a unified field_info dict for the shared filter
         field_info = dict(meta)
         field_info["name"] = fname
         if not is_user_visible_candidate(field_info):
@@ -158,14 +384,15 @@ def compose_field_table_rows(fields_meta, field_comments=None):
     return rows
 
 
-def compose_business_logic_section(business_logic, module_name=""):
+def compose_business_logic_section(business_logic, module_name="",
+                                   validation_errors=None):
     """Составить читаемое описание автоматизированного поведения системы.
 
-    Covers:
-    * Workflow state transitions (with ASCII diagram when <= 7 states)
-    * Action buttons available on the form
-    * Validation constraints (@api.constrains) shown as user-facing rules
+    PROBLEM 4 fix: ``validation_errors`` is a dict {method_name: message}
+    from ast_extractor.  When available, the human-readable ValidationError
+    message replaces the raw method name in the constraints list.
     """
+    validation_errors = validation_errors or {}
     lines = []
 
     # --- Workflow states ---
@@ -190,7 +417,7 @@ def compose_business_logic_section(business_logic, module_name=""):
         )
         lines.append("")
 
-    # --- Validation constraints ---
+    # --- Validation constraints (PROBLEM 4 fix) ---
     constraints = business_logic.get("constraints") or []
     if constraints:
         lines.append("Автоматические проверки системы:")
@@ -198,14 +425,28 @@ def compose_business_logic_section(business_logic, module_name=""):
             "При сохранении записи система автоматически проверяет следующее:"
         )
         for c in constraints:
+            method_name = c.get("method", "")
             fields_str = ", ".join(
                 "«%s»" % f for f in c.get("fields", [])
             )
-            label = c.get("label", c.get("method", ""))
-            if fields_str:
-                lines.append("  • %s (поля: %s)." % (label, fields_str))
+            # Prefer ValidationError message; fall back to humanised method name
+            error_msg = (
+                c.get("error_message")
+                or validation_errors.get(method_name)
+                or ""
+            ).strip()
+            if error_msg:
+                # Show the actual user-facing error message
+                display_label = error_msg
             else:
-                lines.append("  • %s." % label)
+                display_label = c.get("label", method_name)
+
+            if fields_str:
+                lines.append(
+                    "  • %s (поля: %s)." % (display_label, fields_str)
+                )
+            else:
+                lines.append("  • %s." % display_label)
         lines.append("")
 
     return "\n".join(lines).strip()

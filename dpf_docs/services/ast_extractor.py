@@ -9,6 +9,7 @@ tested in isolation. It parses Python source files to recover:
 * plain ``#`` comments, which are NOT available at runtime because the Python
   interpreter discards them. We recover them with ``tokenize`` and attach each
   comment to the nearest following line of real code.
+* ValidationError messages raised inside @api.constrains methods (PROBLEM 4).
 
 The output is a plain dictionary so it can be serialised to JSON and shipped
 around (controller, worker, renderer) without any ORM object in the way.
@@ -31,6 +32,8 @@ class SourceFileDoc:
         self.methods = {}   # "Class.method" -> {"doc": str, "lineno": int}
         self.fields = {}    # "Class.field" -> {"comment": str, "lineno": int}
         self.comments = {}  # lineno -> comment text (without leading "# ")
+        # PROBLEM 4: method_name -> first ValidationError message string
+        self.validation_errors = {}  # method_name -> str
 
     def to_dict(self):
         return {
@@ -40,6 +43,7 @@ class SourceFileDoc:
             "methods": self.methods,
             "fields": self.fields,
             "comments": self.comments,
+            "validation_errors": self.validation_errors,
         }
 
 
@@ -48,7 +52,6 @@ def _field_name_from_assign(node):
 
     Returns ``None`` when the assignment is not a field declaration.
     """
-    # Only handle simple "name = <call>" assignments with a single target.
     if not isinstance(node, ast.Assign) or len(node.targets) != 1:
         return None
     target = node.targets[0]
@@ -58,7 +61,6 @@ def _field_name_from_assign(node):
     if not isinstance(value, ast.Call):
         return None
     func = value.func
-    # Match both "fields.Char(...)" and a bare "Char(...)" style import.
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         if func.value.id == "fields":
             return target.id
@@ -76,32 +78,72 @@ def _collect_comments(source):
                 if text:
                     comments[tok.start[0]] = text
     except (tokenize.TokenError, IndentationError) as exc:
-        # A syntactically odd file should never crash the whole run.
         _logger.warning("Could not tokenize comments: %s", exc)
     return comments
 
 
 def _nearest_comment_block(comments, lineno):
-    """Join the contiguous comment lines that sit directly above ``lineno``.
-
-    Example::
-
-        # First line of help
-        # second line
-        name = fields.Char()   # lineno points here
-
-    returns ``"First line of help second line"``.
-    """
+    """Join the contiguous comment lines that sit directly above ``lineno``."""
     collected = []
     cursor = lineno - 1
     while cursor in comments:
         collected.append(comments[cursor])
         cursor -= 1
     collected.reverse()
-    # Also grab a trailing comment on the same line, if any.
     if lineno in comments:
         collected.append(comments[lineno])
     return " ".join(collected).strip()
+
+
+def _extract_validation_error_message(func_node):
+    """Return the first ValidationError message string inside ``func_node``.
+
+    Searches for AST nodes matching::
+
+        raise ValidationError("some message")
+        raise ValidationError(_("some message"))
+
+    Returns the message string or ``""`` if none found.
+
+    PROBLEM 4 fix.
+    """
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Raise):
+            continue
+        exc = node.exc
+        if exc is None:
+            continue
+        # Support both ``raise ValidationError(...)`` and
+        # ``raise ValidationError(_("..."))`
+        call = None
+        if isinstance(exc, ast.Call):
+            call = exc
+        elif isinstance(exc, ast.Attribute) and isinstance(exc.value, ast.Call):
+            call = exc.value
+        if call is None:
+            continue
+        # Check that the callee is named ValidationError
+        callee = call.func
+        callee_name = ""
+        if isinstance(callee, ast.Name):
+            callee_name = callee.id
+        elif isinstance(callee, ast.Attribute):
+            callee_name = callee.attr
+        if callee_name != "ValidationError":
+            continue
+        # Extract first positional argument
+        if not call.args:
+            continue
+        first_arg = call.args[0]
+        # Direct string literal
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            return first_arg.value
+        # _("...") translation call
+        if isinstance(first_arg, ast.Call) and first_arg.args:
+            inner = first_arg.args[0]
+            if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                return inner.value
+    return ""
 
 
 def extract_from_source(source, path="<string>"):
@@ -128,7 +170,6 @@ def extract_from_source(source, path="<string>"):
                 "doc": ast.get_docstring(node),
                 "lineno": node.lineno,
             }
-            # Walk direct children for methods and field declarations.
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     key = "%s.%s" % (node.name, child.name)
@@ -136,6 +177,11 @@ def extract_from_source(source, path="<string>"):
                         "doc": ast.get_docstring(child),
                         "lineno": child.lineno,
                     }
+                    # PROBLEM 4: extract ValidationError message for constraint methods
+                    msg = _extract_validation_error_message(child)
+                    if msg:
+                        result.validation_errors[child.name] = msg
+
                 field_name = _field_name_from_assign(child)
                 if field_name:
                     key = "%s.%s" % (node.name, field_name)

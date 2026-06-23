@@ -28,6 +28,13 @@ v2 improvements
   of any given model ("tabular parts" embedded in forms).
 * _SYSTEM_FIELDS — extended with website.published.mixin fields so they
   are not shown in user-facing field tables.
+
+v3 fixes
+--------
+* PROBLEM 2: get_fields_meta() now checks getattr(model_cls, fname) for
+  a .compute attribute to correctly flag store=True computed fields.
+* PROBLEM 3: get_business_logic() filters action_* methods to only those
+  defined directly in the addon's own classes (via __qualname__ check).
 """
 import logging
 import re
@@ -89,6 +96,37 @@ def _is_user_input(fname: str, meta: dict) -> bool:
     if meta.get("readonly"):
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Helper: collect class names defined directly in the addon's source files
+# ---------------------------------------------------------------------------
+
+def _get_addon_class_names(module_name):
+    """Return the set of Python class names defined in the addon's source.
+
+    Uses sys.modules to find the already-loaded classes whose __module__
+    path contains the addon's technical name.  This gives us a reliable
+    set for __qualname__ filtering in get_business_logic().
+    """
+    import sys
+    class_names = set()
+    prefix = "%s." % module_name  # e.g. "dpf_events."
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if not (mod_name == module_name or mod_name.startswith(prefix)):
+            continue
+        try:
+            for attr_name in dir(mod):
+                obj = getattr(mod, attr_name, None)
+                if obj is None:
+                    continue
+                if isinstance(obj, type):
+                    class_names.add(obj.__name__)
+        except Exception:
+            pass
+    return class_names
 
 
 class DocIntrospector(models.AbstractModel):
@@ -161,11 +199,17 @@ class DocIntrospector(models.AbstractModel):
     # ------------------------------------------------------------------
     @api.model
     def get_fields_meta(self, res_model):
-        """Return full fields_get metadata."""
+        """Return full fields_get metadata.
+
+        FIX PROBLEM 2: For each field, if fields_get() did not return a
+        'compute' key (can happen for store=True inherited computed fields),
+        we additionally check getattr(model_cls, fname) for a .compute
+        attribute and set computed=True in the result dict.
+        """
         if not res_model or res_model not in self.env:
             return {}
         try:
-            return self.env[res_model].fields_get(
+            raw = self.env[res_model].fields_get(
                 attributes=[
                     "string", "help", "type", "required",
                     "relation", "readonly", "compute", "selection",
@@ -174,6 +218,24 @@ class DocIntrospector(models.AbstractModel):
         except Exception as exc:
             _logger.warning("fields_get failed for %s: %s", res_model, exc)
             return {}
+
+        # PROBLEM 2 fix: cross-check via class attribute for computed fields
+        # that fields_get() may report without the 'compute' key (store=True)
+        try:
+            model_cls = type(self.env[res_model])
+            for fname, meta in raw.items():
+                if meta.get("compute"):
+                    # Already flagged, skip
+                    continue
+                field_obj = getattr(model_cls, fname, None)
+                if field_obj is not None and getattr(field_obj, "compute", None):
+                    meta["compute"] = field_obj.compute
+        except Exception as exc:
+            _logger.debug(
+                "Compute attribute fallback check failed for %s: %s", res_model, exc
+            )
+
+        return raw
 
     @api.model
     def get_user_input_fields(self, res_model):
@@ -203,7 +265,7 @@ class DocIntrospector(models.AbstractModel):
     # Business logic extraction
     # ------------------------------------------------------------------
     @api.model
-    def get_business_logic(self, res_model):
+    def get_business_logic(self, res_model, module_name=None):
         """Extract business logic visible to the user from the ORM.
 
         Returns a dict:
@@ -211,6 +273,10 @@ class DocIntrospector(models.AbstractModel):
           - ``action_buttons``: list of action button labels
           - ``constraints``:    list of {method, label, fields} dicts from
                                 @api.constrains — shown as validation rules
+
+        FIX PROBLEM 3: When ``module_name`` is provided, action_* methods
+        are filtered to only those defined directly in the addon's own
+        Python classes (checked via __qualname__ prefix).
         """
         result = {
             "workflow_states": [],
@@ -223,7 +289,6 @@ class DocIntrospector(models.AbstractModel):
         all_meta = self.get_fields_meta(res_model)
 
         # --- Workflow states ---
-        # Look for a 'state' selection field, then kanban_state, then stage_id.
         for fname in ("state", "kanban_state", "stage_id"):
             meta = all_meta.get(fname)
             if not meta:
@@ -245,38 +310,61 @@ class DocIntrospector(models.AbstractModel):
                     pass
                 break
 
-        # --- Action buttons ---
-        # Discover all action_* methods on the model class.
+        # --- Action buttons (PROBLEM 3 fix) ---
+        # Build the set of class names belonging to the addon (if known).
+        addon_class_names = set()
+        if module_name:
+            addon_class_names = _get_addon_class_names(module_name)
+
         try:
             model_cls = type(self.env[res_model])
             for attr_name in sorted(dir(model_cls)):
-                if attr_name.startswith("action_") and callable(
-                    getattr(model_cls, attr_name, None)
-                ):
-                    label = attr_name[len("action_"):]
-                    label = re.sub(r"[_]+", " ", label).strip().title()
-                    if label and label not in result["action_buttons"]:
-                        result["action_buttons"].append(label)
+                if not attr_name.startswith("action_"):
+                    continue
+                method = getattr(model_cls, attr_name, None)
+                if not callable(method):
+                    continue
+
+                # PROBLEM 3: filter to addon-own methods only
+                if addon_class_names:
+                    qualname = getattr(method, "__qualname__", "") or ""
+                    # __qualname__ for a method is "ClassName.method_name"
+                    owner_class = qualname.split(".")[0] if "." in qualname else ""
+                    if owner_class and owner_class not in addon_class_names:
+                        continue
+
+                label = attr_name[len("action_"):]
+                label = re.sub(r"[_]+", " ", label).strip().title()
+                if label and label not in result["action_buttons"]:
+                    result["action_buttons"].append(label)
         except Exception as exc:
             _logger.debug("action_* discovery failed for %s: %s", res_model, exc)
 
         # --- Constraints (@api.constrains) ---
-        # These become "automatic validation rules" in the documentation.
         try:
             model_cls = type(self.env[res_model])
             for attr_name in sorted(dir(model_cls)):
                 method = getattr(model_cls, attr_name, None)
                 if not callable(method):
                     continue
-                # @api.constrains sets the _constrains attribute on the function
                 constrained_fields = getattr(method, "_constrains", None)
                 if not constrained_fields:
                     continue
+
+                # PROBLEM 3: same filter for constraints — own methods only
+                if addon_class_names:
+                    qualname = getattr(method, "__qualname__", "") or ""
+                    owner_class = qualname.split(".")[0] if "." in qualname else ""
+                    if owner_class and owner_class not in addon_class_names:
+                        continue
+
                 label = re.sub(r"[_]+", " ", attr_name).strip().title()
                 result["constraints"].append({
                     "method": attr_name,
                     "label": label,
                     "fields": list(constrained_fields),
+                    # ValidationError message is enriched later by ast_extractor
+                    "error_message": "",
                 })
         except Exception as exc:
             _logger.debug("constraints discovery failed for %s: %s", res_model, exc)
@@ -346,6 +434,44 @@ class DocIntrospector(models.AbstractModel):
         return result
 
     # ------------------------------------------------------------------
+    # Inherited-only fields for a model (PROBLEM 6 helper)
+    # ------------------------------------------------------------------
+    @api.model
+    def get_addon_own_fields(self, res_model, module_name):
+        """Return only the fields that ``module_name`` added to ``res_model``.
+
+        Used for inherited models: instead of listing ALL fields of the base
+        model, we document only what the addon contributes.
+
+        Detection: fields whose ir.model.data external ID belongs to the module.
+        Falls back to all user-input fields if no imd records are found.
+        """
+        imd_fields = self.env["ir.model.data"].search([
+            ("module", "=", module_name),
+            ("model", "=", "ir.model.fields"),
+        ])
+        if not imd_fields:
+            return self.get_user_input_fields(res_model)
+
+        field_ids = set(imd_fields.mapped("res_id"))
+        ir_fields = self.env["ir.model.fields"].browse(list(field_ids)).exists()
+        # Build set of field names owned by this module on this model
+        owned_fnames = {
+            fld.name
+            for fld in ir_fields
+            if fld.model_id and fld.model_id.model == res_model
+        }
+        if not owned_fnames:
+            return self.get_user_input_fields(res_model)
+
+        all_meta = self.get_fields_meta(res_model)
+        return {
+            fname: meta
+            for fname, meta in all_meta.items()
+            if fname in owned_fnames
+        }
+
+    # ------------------------------------------------------------------
     # Embedded (One2many child) models
     # ------------------------------------------------------------------
     @api.model
@@ -413,13 +539,11 @@ class DocIntrospector(models.AbstractModel):
         if not models_info:
             return None
 
-        # Only own (non-inherited) models are candidates for primary
         non_transient = [
             m for m in models_info
             if not m.get("transient") and not m.get("inherited")
         ]
         if not non_transient:
-            # Fall back to all non-transient (includes inherited)
             non_transient = [m for m in models_info if not m.get("transient")]
         if not non_transient:
             return models_info[0]["model"]
@@ -446,6 +570,5 @@ class DocIntrospector(models.AbstractModel):
 
         primary = max(fan_in, key=fan_in.get)
         if fan_in[primary] == 0:
-            # No cross-references; return first alphabetically
             return sorted(model_names)[0]
         return primary
